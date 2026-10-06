@@ -1,0 +1,12 @@
+[server]
+host = 127.0.0.1
+port = 8787
+base_url = https://kiosapi.com/v1
+
+[keys]
+key1 = sk-xxxx-your-first-key-here
+key2 = sk-xxxx-your-second-key-here
+
+; optional: force-override the model field in every request
+;[model]
+;name = deepseek-v4-flash
