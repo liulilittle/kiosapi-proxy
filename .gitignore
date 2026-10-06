@@ -1,0 +1,10 @@
+# secrets - edit proxy.ini.example and rename to proxy.ini
+proxy.ini
+
+# python
+__pycache__/
+*.pyc
+
+# internal (not for publishing)
+.opencode/
+docs/
