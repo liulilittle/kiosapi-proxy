@@ -385,6 +385,14 @@ class TestConfigUnit(unittest.TestCase):
         finally:
             os.unlink(ini.name)
 
+    def test_load_config_rejects_malformed_upstream_sections(self):
+        for header in ("[ upstream:alpha ]", "[Upstream:alpha]",
+                       "[upstream :alpha]"):
+            text = self._config_text(
+                header + "\nbase_url = https://a.invalid/v1\nkeys = k1\n")
+            with self.assertRaises(self.mod.ConfigError, msg=header):
+                self._load_text(text)
+
     def test_load_config_percent_in_key(self):
         cfg = self._load_text(self._config_text().replace(
             "key1 = DEFAULT-KEY", "key1 = sk-abc%def"))

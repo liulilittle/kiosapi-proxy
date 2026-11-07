@@ -151,6 +151,18 @@ class TestCli(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertIn("config OK", out)
 
+    def test_validate_rejects_malformed_upstream_sections(self):
+        for header in ("[ upstream:alpha ]", "[Upstream:alpha]"):
+            with open(self.ini, "w", encoding="utf-8") as fh:
+                fh.write(SAMPLE.split("[upstream:kenari]")[0] + header +
+                         "\nbase_url = https://a.invalid/v1\nkeys = k1\n")
+            code, out = self.run_cli("validate")
+            self.assertEqual(code, 1, header + out)
+            self.assertIn("invalid upstream section", out)
+            code, out = self.run_cli("add-key", "alpha", "k2", "--no-reload")
+            self.assertEqual(code, 1, header + out)
+            self.assertIn("invalid upstream section", out)
+
     def test_add_key(self):
         code, out = self.run_cli("add-key", "kenari", "kn-ccc333", "--no-reload")
         self.assertEqual(code, 0)

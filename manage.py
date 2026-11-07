@@ -247,6 +247,10 @@ def load_parser(path):
     seen = set()
     for section in cp.sections():
         if not section.startswith("upstream:"):
+            if re.match(r"^\s*upstream\s*:", section, re.IGNORECASE):
+                raise ValueError(
+                    "invalid upstream section name [%s]; expected [upstream:name]"
+                    % section)
             continue
         name = normalize_section(section).split(":", 1)[1]
         if name in seen:
