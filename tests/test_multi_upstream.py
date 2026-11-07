@@ -651,6 +651,116 @@ class TestConfigUnit(unittest.TestCase):
             self.assertNotIn(name, headers)
         self.assertEqual(headers["X-Test"], "1")
 
+    def test_mask_key_hides_short_keys(self):
+        self.assertEqual(self.mod.mask_key(""), "...")
+        self.assertEqual(self.mod.mask_key("abcd"), "...")
+        self.assertEqual(self.mod.mask_key("abcdefgh"), "...")
+        self.assertEqual(self.mod.mask_key("abcdefghi"), "...fghi")
+
+    def test_is_loopback_ipv4_mapped(self):
+        self.assertTrue(self.mod.is_loopback("::ffff:127.0.0.1"))
+        self.assertFalse(self.mod.is_loopback("example.com"))
+
+    def test_client_key_accepts_bearer_and_x_api_key(self):
+        from multidict import CIMultiDict
+        bearer = CIMultiDict()
+        bearer["Authorization"] = "Bearer abc"
+        self.assertEqual(self.mod.client_key(bearer), "abc")
+        api_key = CIMultiDict()
+        api_key["X-API-Key"] = "xyz"
+        self.assertEqual(self.mod.client_key(api_key), "xyz")
+
+    def test_route_prefers_longest_prefix_and_preserves_query(self):
+        alpha = self.mod.Upstream("alpha", "https://a.invalid/v1", "/a", ["A"])
+        beta = self.mod.Upstream("beta", "https://b.invalid/v1", "/a/b", ["B"])
+        cfg = type("Cfg", (), {
+            "base_url": "https://d.invalid/v1", "model": "", "timeout": 10,
+            "keys": ["D"], "auth_keys": [], "state_file": "", "reload_interval": 0,
+            "path": "nonexistent.ini", "log_requests": False,
+            "upstreams": [alpha, beta]})()
+        engine = self.mod.ProxyEngine(cfg)
+        upstream, path = engine.route("/a/b/v1/chat/completions?x=1")
+        self.assertIs(upstream, beta)
+        self.assertEqual(path, "/v1/chat/completions?x=1")
+        upstream, path = engine.route("/a/v1/models")
+        self.assertIs(upstream, alpha)
+        self.assertEqual(path, "/v1/models")
+        upstream, path = engine.route("/kiosapi/v1/models?y=2")
+        self.assertIs(upstream, engine.default)
+        self.assertEqual(path, "/v1/models?y=2")
+        upstream, path = engine.route("/elsewhere")
+        self.assertIs(upstream, engine.default)
+        self.assertEqual(path, "/elsewhere")
+
+    def test_apply_model_only_overrides_dict(self):
+        upstream = self.mod.Upstream(
+            "u", "https://a.invalid/v1", "/u", ["K"], model="forced")
+        cfg = type("Cfg", (), {
+            "base_url": "https://d.invalid/v1", "model": "", "timeout": 10,
+            "keys": ["D"], "auth_keys": [], "state_file": "", "reload_interval": 0,
+            "path": "nonexistent.ini", "log_requests": False,
+            "upstreams": []})()
+        engine = self.mod.ProxyEngine(cfg)
+        out = engine._apply_model(b'{"model":"orig","x":1}', upstream)
+        self.assertEqual(json.loads(out)["model"], "forced")
+        self.assertEqual(engine._apply_model(b"[1]", upstream), b"[1]")
+        self.assertEqual(engine._apply_model(b"not json", upstream), b"not json")
+        upstream.model = ""
+        self.assertEqual(engine._apply_model(b'{"model":"orig"}', upstream),
+                         b'{"model":"orig"}')
+
+    def test_copy_response_headers_filters_unlisted(self):
+        target = {}
+        self.mod.copy_response_headers(target, {
+            "content-type": "text/event-stream",
+            "set-cookie": "sid=1",
+            "x-request-id": "r1"})
+        self.assertEqual(target, {"content-type": "text/event-stream",
+                                  "x-request-id": "r1"})
+        self.mod.copy_response_headers(target, None)
+        self.assertEqual(target, {"content-type": "text/event-stream",
+                                  "x-request-id": "r1"})
+
+    def test_keypool_advance_past_unknown_key_is_noop(self):
+        pool = self.mod.KeyPool(["A", "B"])
+        pool.advance_past("missing")
+        self.assertEqual(pool.candidates(), ["A", "B"])
+
+    def test_keypool_mark_limited_invalid_retry_after_uses_default(self):
+        pool = self.mod.KeyPool(["A"], default_cooldown=30)
+        self.assertTrue(pool.mark_limited("A", "bogus"))
+        self.assertEqual(pool.candidates(), ["A"])
+        self.assertFalse(pool.mark_limited("A", None))
+
+    def test_parse_retry_after_rejects_invalid(self):
+        self.assertIsNone(self.mod.parse_retry_after(None))
+        self.assertIsNone(self.mod.parse_retry_after(""))
+        self.assertIsNone(self.mod.parse_retry_after("not-a-date"))
+
+    def test_load_config_rejects_invalid_integer_and_boolean(self):
+        for line in ("timeout = abc", "max_body_size = 0",
+                     "log_requests = maybe"):
+            text = ("[server]\nhost = 127.0.0.1\nport = 8787\n"
+                    "base_url = https://x.invalid/v1\n" + line +
+                    "\n[keys]\nkey1 = K\n")
+            with self.assertRaises(self.mod.ConfigError):
+                self._config_from_text(text)
+
+    def test_save_state_and_load_state_roundtrip(self):
+        tmpdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmpdir, True)
+        state_path = os.path.join(tmpdir, "state.json")
+        cfg = type("Cfg", (), {
+            "base_url": "https://x.invalid/v1", "model": "", "timeout": 10,
+            "keys": ["A", "B"], "auth_keys": [], "state_file": state_path,
+            "reload_interval": 0, "path": "nonexistent.ini",
+            "log_requests": False, "upstreams": []})()
+        engine = self.mod.ProxyEngine(cfg)
+        engine.default.pool.candidates()
+        engine.save_state()
+        reloaded = self.mod.ProxyEngine(cfg)
+        self.assertEqual(reloaded.default.pool.ordered_for_persist(), ["B", "A"])
+
     def test_reload_keeps_bound_hosts_for_security_gate(self):
         old = self._config_from_text(
             "[server]\nhost = 0.0.0.0\nport = 8787\n"
