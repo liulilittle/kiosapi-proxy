@@ -739,12 +739,23 @@ class TestConfigUnit(unittest.TestCase):
 
     def test_load_config_rejects_invalid_integer_and_boolean(self):
         for line in ("timeout = abc", "max_body_size = 0",
-                     "log_requests = maybe"):
+                     "log_requests = maybe", "max_response_size = -1"):
             text = ("[server]\nhost = 127.0.0.1\nport = 8787\n"
                     "base_url = https://x.invalid/v1\n" + line +
                     "\n[keys]\nkey1 = K\n")
             with self.assertRaises(self.mod.ConfigError):
                 self._config_from_text(text)
+
+    def test_load_config_accepts_max_response_size(self):
+        text = ("[server]\nhost = 127.0.0.1\nport = 8787\n"
+                "base_url = https://x.invalid/v1\nmax_response_size = 1024\n"
+                "[keys]\nkey1 = K\n")
+        cfg = self._config_from_text(text)
+        self.assertEqual(cfg.max_response_size, 1024)
+        disabled = ("[server]\nhost = 127.0.0.1\nport = 8787\n"
+                    "base_url = https://x.invalid/v1\nmax_response_size = 0\n"
+                    "[keys]\nkey1 = K\n")
+        self.assertEqual(self._config_from_text(disabled).max_response_size, 0)
 
     def test_save_state_and_load_state_roundtrip(self):
         tmpdir = tempfile.mkdtemp()
@@ -760,6 +771,20 @@ class TestConfigUnit(unittest.TestCase):
         engine.save_state()
         reloaded = self.mod.ProxyEngine(cfg)
         self.assertEqual(reloaded.default.pool.ordered_for_persist(), ["B", "A"])
+
+    def test_reload_updates_max_response_size(self):
+        old = self._config_from_text(
+            "[server]\nhost = 127.0.0.1\nport = 8787\n"
+            "base_url = https://x.invalid/v1\n"
+            "[keys]\nkey1 = K\n")
+        new = self._config_from_text(
+            "[server]\nhost = 127.0.0.1\nport = 8787\n"
+            "base_url = https://x.invalid/v1\nmax_response_size = 2048\n"
+            "[keys]\nkey1 = K\n")
+        engine = self.mod.ProxyEngine(old)
+        self.assertEqual(engine.max_response_size, self.mod.DEFAULT_MAX_BODY)
+        engine.apply_config(new)
+        self.assertEqual(engine.max_response_size, 2048)
 
     def test_reload_keeps_bound_hosts_for_security_gate(self):
         old = self._config_from_text(
@@ -842,6 +867,226 @@ class TestConfigUnit(unittest.TestCase):
 
         asyncio.run(scenario())
         self.assertTrue(resp.closed)
+
+    def test_forward_maps_network_errors_to_generic_502(self):
+        class Session:
+            def __init__(self, exc):
+                self.exc = exc
+                self.calls = 0
+
+            async def request(self, *args, **kwargs):
+                self.calls += 1
+                raise self.exc
+
+        cases = [asyncio.TimeoutError("secret timeout"),
+                 aiohttp.ClientError("secret client error"),
+                 ConnectionError("secret connection")]
+        for exc in cases:
+            cfg = type("Cfg", (), {
+                "base_url": "https://x.invalid/v1", "model": "", "timeout": 10,
+                "keys": ["K1", "K2"], "auth_keys": [], "state_file": "",
+                "reload_interval": 0, "path": "nonexistent.ini",
+                "log_requests": False, "upstreams": []})()
+            engine = self.mod.ProxyEngine(cfg)
+            session = Session(exc)
+            engine.session = session
+            kind, status, body, _ = asyncio.run(engine.forward(
+                "POST", "/v1/chat/completions", b"{}", "application/json"))
+            self.assertEqual(status, 502)
+            self.assertEqual(json.loads(body)["error"]["type"], "proxy_error")
+            self.assertNotIn("secret", body.decode("utf-8"))
+            self.assertEqual(session.calls, 1)
+
+    def test_forward_closes_response_on_payload_error(self):
+        class Resp:
+            status = 200
+            headers = {}
+
+            def __init__(self):
+                self.closed = False
+
+            async def read(self):
+                raise aiohttp.ClientPayloadError("secret payload")
+
+            def close(self):
+                self.closed = True
+
+        resp = Resp()
+        engine = self._fake_engine(resp)
+        kind, status, body, _ = asyncio.run(engine.forward(
+            "POST", "/v1/chat/completions", b"{}", "application/json"))
+        self.assertEqual(status, 502)
+        self.assertNotIn("secret", body.decode("utf-8"))
+        self.assertTrue(resp.closed)
+
+    def test_read_body_limited_rejects_content_length_early(self):
+        class Resp:
+            status = 200
+            headers = {"Content-Length": "101"}
+
+            async def read(self):
+                raise AssertionError("must not read an oversized body")
+
+            def close(self):
+                self.closed = True
+
+        resp = Resp()
+        with self.assertRaises(self.mod.ResponseTooLarge):
+            asyncio.run(self.mod.read_body_limited(resp, 100))
+
+    def test_read_body_limited_stops_at_limit(self):
+        class Content:
+            async def iter_chunked(self, size):
+                yield b"a" * 80
+                yield b"b" * 80
+
+        class Resp:
+            status = 200
+            headers = {}
+
+            def __init__(self):
+                self.content = Content()
+
+            def release(self):
+                self.released = True
+
+            def close(self):
+                self.closed = True
+
+        resp = Resp()
+        with self.assertRaises(self.mod.ResponseTooLarge):
+            asyncio.run(self.mod.read_body_limited(resp, 100))
+
+    def test_read_body_limited_accepts_exact_limit(self):
+        class Content:
+            def __init__(self, total):
+                self.total = total
+
+            async def iter_chunked(self, size):
+                yield b"a" * self.total
+
+        class Resp:
+            status = 200
+            headers = {}
+
+            def __init__(self, total):
+                self.content = Content(total)
+
+            def release(self):
+                pass
+
+        self.assertEqual(
+            asyncio.run(self.mod.read_body_limited(Resp(100), 100)),
+            b"a" * 100)
+        with self.assertRaises(self.mod.ResponseTooLarge):
+            asyncio.run(self.mod.read_body_limited(Resp(101), 100))
+
+    def test_read_body_limited_falls_back_to_read(self):
+        class Resp:
+            status = 200
+            headers = {}
+
+            async def read(self):
+                return b"12345"
+
+        self.assertEqual(
+            asyncio.run(self.mod.read_body_limited(Resp(), 100)), b"12345")
+
+    def test_forward_rejects_oversized_response_body(self):
+        class Content:
+            async def iter_chunked(self, size):
+                for _ in range(4):
+                    yield b"x" * 64
+
+        class Resp:
+            status = 200
+            headers = {}
+
+            def __init__(self):
+                self.content = Content()
+                self.closed = False
+
+            def close(self):
+                self.closed = True
+
+        resp = Resp()
+        cfg = type("Cfg", (), {
+            "base_url": "https://x.invalid/v1", "model": "", "timeout": 10,
+            "keys": ["K"], "auth_keys": [], "state_file": "",
+            "reload_interval": 2, "path": "nonexistent.ini",
+            "log_requests": False, "upstreams": []})()
+        cfg.max_response_size = 100
+
+        class Session:
+            async def request(self, *args, **kwargs):
+                return resp
+
+        engine = self.mod.ProxyEngine(cfg)
+        engine.session = Session()
+        with contextlib.redirect_stdout(io.StringIO()):
+            kind, status, body, _ = asyncio.run(engine.forward(
+                "POST", "/v1/chat/completions", b"{}", "application/json"))
+        self.assertEqual(status, 502)
+        self.assertEqual(json.loads(body)["error"]["type"], "proxy_error")
+        self.assertTrue(resp.closed)
+
+    def test_apply_config_during_inflight_requests_is_safe(self):
+        old = self._config_from_text(
+            "[server]\nhost = 127.0.0.1\nport = 8787\n"
+            "base_url = https://old.invalid/v1\n"
+            "auth_keys = pk-1\n"
+            "[keys]\nkey1 = A\nkey2 = B\n")
+        new = self._config_from_text(
+            "[server]\nhost = 127.0.0.1\nport = 8787\n"
+            "base_url = https://new.invalid/v1\n"
+            "auth_keys = pk-1\n"
+            "[keys]\nkey1 = C\n")
+        started = asyncio.Event()
+        release = asyncio.Event()
+        counter = {"n": 0}
+
+        class Resp:
+            def __init__(self, status, body):
+                self.status = status
+                self.headers = {}
+                self.body = body
+
+            async def read(self):
+                return self.body
+
+            def release(self):
+                pass
+
+            def close(self):
+                pass
+
+        class Session:
+            async def request(self, method, url, data, headers, **kwargs):
+                counter["n"] += 1
+                if counter["n"] == 2:
+                    started.set()
+                await release.wait()
+                key = headers.get("Authorization", "").replace("Bearer ", "")
+                if key == "A":
+                    return Resp(429, b'{"error":{"message":"limited"}}')
+                return Resp(200, b'{"ok":true}')
+
+        async def scenario():
+            engine = self.mod.ProxyEngine(old)
+            engine.session = Session()
+            tasks = [asyncio.create_task(engine.forward(
+                "POST", "/v1/chat/completions", b"{}", "application/json"))
+                for _ in range(2)]
+            await asyncio.wait_for(started.wait(), 5)
+            engine.apply_config(new)
+            release.set()
+            results = await asyncio.gather(*tasks)
+            return engine, results
+
+        engine, results = asyncio.run(scenario())
+        self.assertEqual([result[1] for result in results], [200, 200])
+        self.assertEqual(engine.default.pool.keys, ["C"])
+        self.assertEqual(engine.config.default.keys, ["C"])
 
     def test_read_stream_prefix_has_total_deadline(self):
         class Content:

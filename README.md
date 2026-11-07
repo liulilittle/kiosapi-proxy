@@ -24,6 +24,7 @@ rotate_auth_errors = true  ; 401/403 视为该 key 失效并换下一个
 max_body_size = 67108864   ; 请求体上限（默认 64 MiB）
 ; state_file = proxy.ini.state.json ; key 顺序持久化文件，off 可关闭
 timeout = 120
+max_response_size = 67108864 ; 上游响应体大小上限（默认 64 MiB），防止内存无限增长
 
 base_url = https://kiosapi.com/v1   ; 默认上游（无前缀路径走这里）
 
@@ -106,13 +107,15 @@ x-api-key: <proxy-key>
 
 ## 轮换与限流判定
 
-- 命中限额：HTTP 429、402，或 4xx/5xx 响应体出现限额关键字（`rate_limit`、`free_quota`、`plan_limit_reached`、`insufficient_balance`、`FreeUsageLimitError`、`GoUsageLimitError` 等）。
+- 命中限额：HTTP 429、402，或 4xx 响应体出现限额关键字（`rate_limit`、`free_quota`、`plan_limit_reached`、`insufficient_balance`、`FreeUsageLimitError`、`GoUsageLimitError` 等）；5xx 一律透传，不按 body 关键字轮换。
 - 401/403 默认视为该 key 失效（吊销/无权限），冷却 1 小时后换下一个 key；全部失效才返回最后一次 401/403。`rotate_auth_errors = false` 可恢复原样透传。
 - 2xx 响应永不按响应体关键字判定，避免正常输出里的 "rate limit" 触发换 key。
 - 冷却时长取 `Retry-After`（上限 3600 秒），缺省 60 秒；冷却中的 key 排到候选末尾，全部冷却时仍然尝试。
 - 证书错误换下一个 key 重试；其它连接错误直接返回 502。
 - 上游没有配置任何 key 时返回 503 `proxy_config_error`（不会误报 502）。
 - 请求体默认上限 64 MiB（`max_body_size`），支持多模态大图/视频。
+- 上游非流式响应体默认上限 64 MiB（`max_response_size`，0 表示不限制），超限返回 502 `proxy_error` 并关闭上游连接，避免被异常上游拖垮内存。
+- `base_url` 自带 query（如 Azure `?api-version=...`）时，客户端 query 优先，其余 base query 参数自动追加。
 
 ## 各上游错误码差异（官方文档 + 实测）
 

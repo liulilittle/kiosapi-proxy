@@ -85,6 +85,10 @@ class ConfigError(Exception):
     pass
 
 
+class ResponseTooLarge(Exception):
+    pass
+
+
 class KeyPool:
     """Round-robin key pool with per-key cooldown after a rate-limit hit."""
 
@@ -337,6 +341,36 @@ def extract_body_error(body, path):
     return data
 
 
+async def read_body_limited(resp, limit):
+    """Read a non-stream body, refusing payloads larger than limit bytes."""
+    if limit and limit > 0:
+        raw = resp.headers.get("Content-Length")
+        if raw is not None:
+            try:
+                declared = int(raw)
+            except (TypeError, ValueError):
+                declared = None
+            if declared is not None and declared > limit:
+                raise ResponseTooLarge(
+                    "upstream response Content-Length %d exceeds limit %d"
+                    % (declared, limit))
+    if not hasattr(resp, "content") or not hasattr(resp.content, "iter_chunked"):
+        data = await resp.read()
+        if limit and limit > 0 and len(data) > limit:
+            raise ResponseTooLarge(
+                "upstream response body exceeds limit %d" % limit)
+        return data
+    chunks = []
+    total = 0
+    async for chunk in resp.content.iter_chunked(65536):
+        total += len(chunk)
+        if limit and limit > 0 and total > limit:
+            raise ResponseTooLarge(
+                "upstream response body exceeds limit %d" % limit)
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 async def read_stream_prefix(resp, limit=65536, timeout=2.0):
     """Read enough of a 200 stream to tell a JSON error body from SSE."""
     buf = b""
@@ -436,13 +470,38 @@ def _join_paths(base_path, remainder):
     return base_path + remainder
 
 
+def _merge_query(client_query, base_query):
+    """Client query wins; base query params are appended when not overridden."""
+    if not client_query:
+        return base_query
+    if not base_query:
+        return client_query
+    from urllib.parse import unquote_plus
+    seen = set()
+    for segment in client_query.split("&"):
+        if segment:
+            seen.add(unquote_plus(segment.split("=", 1)[0]))
+    extra = []
+    for segment in base_query.split("&"):
+        if not segment:
+            continue
+        name = unquote_plus(segment.split("=", 1)[0])
+        if name in seen:
+            continue
+        seen.add(name)
+        extra.append(segment)
+    if not extra:
+        return client_query
+    return client_query + "&" + "&".join(extra)
+
+
 def join_upstream_url(base_url, path):
     """Join client path to upstream base_url, avoiding duplicated path prefixes."""
     base = urlsplit(base_url)
     client = urlsplit(path)
     base_path = base.path.rstrip("/")
     upstream_path = _join_paths(base_path, client.path)
-    query = client.query or base.query
+    query = _merge_query(client.query, base.query)
     return urlunsplit((base.scheme, base.netloc, upstream_path, query, ""))
 
 
@@ -519,6 +578,11 @@ def load_config(path):
         server.get("max_body_size", str(DEFAULT_MAX_BODY)), "max_body_size")
     if max_body_size <= 0:
         raise ConfigError("max_body_size must be positive")
+    max_response_size = _int(
+        server.get("max_response_size", str(DEFAULT_MAX_BODY)),
+        "max_response_size")
+    if max_response_size < 0:
+        raise ConfigError("max_response_size must be >= 0")
     admin_key = server.get("admin_key", "").strip()
     admin_allow_remote = _bool(
         server.get("admin_allow_remote", "false"), "admin_allow_remote")
@@ -606,6 +670,7 @@ def load_config(path):
         log_requests=log_requests, state_file=state_file,
         rotate_auth_errors=rotate_auth_errors,
         max_body_size=max_body_size,
+        max_response_size=max_response_size,
         admin_key=admin_key, admin_allow_remote=admin_allow_remote,
         default=default, upstreams=upstreams)
 
@@ -690,6 +755,8 @@ class ProxyEngine:
         self.admin_allow_remote = getattr(config, "admin_allow_remote", False)
         self.rotate_auth_errors = getattr(config, "rotate_auth_errors", True)
         self.state_path = getattr(config, "state_file", "") or ""
+        self.max_response_size = getattr(
+            config, "max_response_size", DEFAULT_MAX_BODY)
         self._state_dirty = False
         self._last_state_save = 0.0
         self._state_warned = False
@@ -875,7 +942,19 @@ class ProxyEngine:
                     if key != first:
                         upstream.pool.advance_past(key)
                     return ("stream", resp.status, StreamPayload(resp, prefix), resp)
-                data = await resp.read()
+                try:
+                    data = await read_body_limited(resp, self.max_response_size)
+                except ResponseTooLarge as ex:
+                    if not released:
+                        try:
+                            resp.close()
+                        except Exception:
+                            pass
+                    print("[kiosapi-proxy] upstream=%s rejected oversized response: %s"
+                          % (upstream.name, ex), flush=True)
+                    return ("plain", 502, json.dumps(
+                        {"error": {"message": "upstream response too large",
+                                   "type": "proxy_error"}}).encode(), None)
                 resp_headers = resp.headers.copy()
                 retry_after = parse_retry_after(resp_headers.get("Retry-After"))
                 resp.release()
@@ -984,6 +1063,8 @@ class ProxyEngine:
         self.admin_key = getattr(new_config, "admin_key", "")
         self.admin_allow_remote = getattr(new_config, "admin_allow_remote", False)
         self.rotate_auth_errors = getattr(new_config, "rotate_auth_errors", True)
+        self.max_response_size = getattr(
+            new_config, "max_response_size", DEFAULT_MAX_BODY)
         new_state_path = getattr(new_config, "state_file", "") or ""
         if new_state_path != self.state_path:
             self._state_warned = False

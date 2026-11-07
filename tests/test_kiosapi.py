@@ -113,6 +113,29 @@ class TestJoinUpstreamURL(unittest.TestCase):
             mod.join_upstream_url("https://kiosapi.com/v1", "/v1/models?x=1"),
             "https://kiosapi.com/v1/models?x=1")
 
+    def test_base_query_kept_when_client_has_query(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("kiosapi", SCRIPT)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        self.assertEqual(
+            mod.join_upstream_url(
+                "https://x.azure.com/openai/deployments/d?api-version=2024-02-01",
+                "/openai/deployments/d/chat/completions?foo=bar"),
+            "https://x.azure.com/openai/deployments/d/chat/completions"
+            "?foo=bar&api-version=2024-02-01")
+
+    def test_client_query_wins_over_base_query(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("kiosapi", SCRIPT)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        self.assertEqual(
+            mod.join_upstream_url(
+                "https://x.invalid/v1?api-version=old",
+                "/v1/models?api-version=new"),
+            "https://x.invalid/v1/models?api-version=new")
+
     def test_trailing_slash_base(self):
         import importlib.util
         spec = importlib.util.spec_from_file_location("kiosapi", SCRIPT)
