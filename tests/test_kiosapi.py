@@ -1,4 +1,4 @@
-import unittest
+﻿import unittest
 import threading
 import json
 import socket
@@ -7,7 +7,10 @@ import http.server
 import urllib.request
 import urllib.error
 import time
+import os
 from collections import Counter
+
+SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "kiosapi.py")
 
 
 class FakeUpstream(http.server.BaseHTTPRequestHandler):
@@ -61,6 +64,14 @@ def start_upstream():
     return server
 
 
+def free_port():
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
 def wait_port(port, timeout=10):
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -77,7 +88,7 @@ class TestJoinUpstreamURL(unittest.TestCase):
 
     def test_duplicate_v1_prefix(self):
         import importlib.util
-        spec = importlib.util.spec_from_file_location("kiosapi", r"F:\kiosapi\kiosapi.py")
+        spec = importlib.util.spec_from_file_location("kiosapi", SCRIPT)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         self.assertEqual(
@@ -86,7 +97,7 @@ class TestJoinUpstreamURL(unittest.TestCase):
 
     def test_no_duplicate_when_base_has_no_prefix(self):
         import importlib.util
-        spec = importlib.util.spec_from_file_location("kiosapi", r"F:\kiosapi\kiosapi.py")
+        spec = importlib.util.spec_from_file_location("kiosapi", SCRIPT)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         self.assertEqual(
@@ -95,7 +106,7 @@ class TestJoinUpstreamURL(unittest.TestCase):
 
     def test_query_preserved(self):
         import importlib.util
-        spec = importlib.util.spec_from_file_location("kiosapi", r"F:\kiosapi\kiosapi.py")
+        spec = importlib.util.spec_from_file_location("kiosapi", SCRIPT)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         self.assertEqual(
@@ -104,7 +115,7 @@ class TestJoinUpstreamURL(unittest.TestCase):
 
     def test_trailing_slash_base(self):
         import importlib.util
-        spec = importlib.util.spec_from_file_location("kiosapi", r"F:\kiosapi\kiosapi.py")
+        spec = importlib.util.spec_from_file_location("kiosapi", SCRIPT)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         self.assertEqual(
@@ -113,7 +124,7 @@ class TestJoinUpstreamURL(unittest.TestCase):
 
     def test_exact_v1_path(self):
         import importlib.util
-        spec = importlib.util.spec_from_file_location("kiosapi", r"F:\kiosapi\kiosapi.py")
+        spec = importlib.util.spec_from_file_location("kiosapi", SCRIPT)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         self.assertEqual(
@@ -122,7 +133,7 @@ class TestJoinUpstreamURL(unittest.TestCase):
 
     def test_non_v1_client_path_with_v1_base(self):
         import importlib.util
-        spec = importlib.util.spec_from_file_location("kiosapi", r"F:\kiosapi\kiosapi.py")
+        spec = importlib.util.spec_from_file_location("kiosapi", SCRIPT)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         self.assertEqual(
@@ -131,7 +142,7 @@ class TestJoinUpstreamURL(unittest.TestCase):
 
     def test_root_base_url(self):
         import importlib.util
-        spec = importlib.util.spec_from_file_location("kiosapi", r"F:\kiosapi\kiosapi.py")
+        spec = importlib.util.spec_from_file_location("kiosapi", SCRIPT)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         self.assertEqual(
@@ -143,7 +154,7 @@ class TestCertificateRetry(unittest.TestCase):
 
     def _load_mod(self):
         import importlib.util
-        spec = importlib.util.spec_from_file_location("kiosapi", r"F:\kiosapi\kiosapi.py")
+        spec = importlib.util.spec_from_file_location("kiosapi", SCRIPT)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         return mod
@@ -162,7 +173,7 @@ class TestCertificateRetry(unittest.TestCase):
         seen = []
 
         class FakeSession:
-            async def request(self, method, url, data, headers):
+            async def request(self, method, url, data, headers, **kwargs):
                 key = headers["Authorization"].replace("Bearer ", "")
                 seen.append(key)
                 if key == "KEY-A":
@@ -187,7 +198,7 @@ class TestCertificateRetry(unittest.TestCase):
         mod = self._load_mod()
 
         class FakeSession:
-            async def request(self, method, url, data, headers):
+            async def request(self, method, url, data, headers, **kwargs):
                 raise ssl.SSLCertVerificationError("unknown certificate verification error")
 
         cfg = type("Cfg", (), {"base_url": "https://up.example/v1", "model": "", "timeout": 10, "keys": ["KEY-A", "KEY-B"]})()
@@ -204,7 +215,7 @@ class TestCertificateRetry(unittest.TestCase):
         mod = self._load_mod()
 
         class FakeSession:
-            async def request(self, method, url, data, headers):
+            async def request(self, method, url, data, headers, **kwargs):
                 raise OSError("connection refused")
 
         cfg = type("Cfg", (), {"base_url": "https://up.example/v1", "model": "", "timeout": 10, "keys": ["KEY-A", "KEY-B"]})()
@@ -228,16 +239,19 @@ class TestKeyRotation(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.upstream.shutdown()
+        cls.upstream.server_close()
 
     def setUp(self):
         FakeUpstream.limits = {}
         FakeUpstream.log = []
 
-    def _start_proxy(self, keys, ini_port):
+    def _start_proxy(self, keys, ini_port=None):
         import subprocess
         import sys
         import tempfile
         import os
+        if ini_port is None:
+            ini_port = free_port()
         ini = tempfile.NamedTemporaryFile("w", suffix=".ini", delete=False, encoding="utf-8")
         ini.write("[server]\nhost = 127.0.0.1\nport = %d\nbase_url = %s\n\n[keys]\n" % (ini_port, self.upstream_url))
         for i, k in enumerate(keys, 1):
@@ -248,11 +262,13 @@ class TestKeyRotation(unittest.TestCase):
             [sys.executable, script, "--config", ini.name],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         wait_port(ini_port)
-        return proc, ini.name
+        return proc, ini.name, ini_port
 
     def _stop_proxy(self, proc):
         proc.terminate()
         proc.wait(timeout=5)
+        if proc.stdout:
+            proc.stdout.close()
 
     def _chat(self, port, stream=False):
         payload = {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
@@ -265,8 +281,7 @@ class TestKeyRotation(unittest.TestCase):
         return urllib.request.urlopen(req, timeout=10)
 
     def test_normal_request_uses_first_key(self):
-        port = 18700
-        proc, ini = self._start_proxy(["KEY-A", "KEY-B"], port)
+        proc, ini, port = self._start_proxy(["KEY-A", "KEY-B"])
         try:
             body = json.loads(self._chat(port).read())
             self.assertEqual(body["used_key"], "KEY-A")
@@ -274,9 +289,8 @@ class TestKeyRotation(unittest.TestCase):
             self._stop_proxy(proc)
 
     def test_limited_key_rotates_to_next(self):
-        port = 18701
         FakeUpstream.limits = {"KEY-A"}
-        proc, ini = self._start_proxy(["KEY-A", "KEY-B"], port)
+        proc, ini, port = self._start_proxy(["KEY-A", "KEY-B"])
         try:
             body = json.loads(self._chat(port).read())
             self.assertEqual(body["used_key"], "KEY-B")
@@ -284,9 +298,8 @@ class TestKeyRotation(unittest.TestCase):
             self._stop_proxy(proc)
 
     def test_all_limited_returns_429(self):
-        port = 18702
         FakeUpstream.limits = {"KEY-A", "KEY-B"}
-        proc, ini = self._start_proxy(["KEY-A", "KEY-B"], port)
+        proc, ini, port = self._start_proxy(["KEY-A", "KEY-B"])
         try:
             try:
                 self._chat(port)
@@ -294,14 +307,14 @@ class TestKeyRotation(unittest.TestCase):
             except urllib.error.HTTPError as e:
                 self.assertEqual(e.code, 429)
                 err = json.loads(e.read())
+                e.close()
                 self.assertIn("Too many requests", err["error"]["message"])
         finally:
             self._stop_proxy(proc)
 
     def test_non_429_error_passed_through(self):
-        port = 18703
         FakeUpstream.limits = {}
-        proc, ini = self._start_proxy(["KEY-A", "KEY-B"], port)
+        proc, ini, port = self._start_proxy(["KEY-A", "KEY-B"])
         try:
             resp = self._chat(port)
             self.assertEqual(resp.status, 200)
@@ -309,8 +322,7 @@ class TestKeyRotation(unittest.TestCase):
             self._stop_proxy(proc)
 
     def test_round_robin_rotates_between_keys(self):
-        port = 18704
-        proc, ini = self._start_proxy(["KEY-A", "KEY-B", "KEY-C"], port)
+        proc, ini, port = self._start_proxy(["KEY-A", "KEY-B", "KEY-C"])
         try:
             used = []
             for _ in range(3):
@@ -320,8 +332,7 @@ class TestKeyRotation(unittest.TestCase):
             self._stop_proxy(proc)
 
     def test_streaming_passthrough(self):
-        port = 18705
-        proc, ini = self._start_proxy(["KEY-A"], port)
+        proc, ini, port = self._start_proxy(["KEY-A"])
         try:
             resp = self._chat(port, stream=True)
             self.assertEqual(resp.status, 200)
@@ -333,9 +344,8 @@ class TestKeyRotation(unittest.TestCase):
 
     def test_429_advances_pointer_between_requests(self):
         """After A was limited and B succeeded, next request must start at C."""
-        port = 18706
         FakeUpstream.limits = {"KEY-A"}
-        proc, ini = self._start_proxy(["KEY-A", "KEY-B", "KEY-C"], port)
+        proc, ini, port = self._start_proxy(["KEY-A", "KEY-B", "KEY-C"])
         try:
             first = json.loads(self._chat(port).read())["used_key"]
             second = json.loads(self._chat(port).read())["used_key"]
@@ -346,9 +356,8 @@ class TestKeyRotation(unittest.TestCase):
 
     def test_mixed_limit_sequence(self):
         """A and C limited: req1 -> B, req2 (A still limited) -> B, req3 -> ?"""
-        port = 18707
         FakeUpstream.limits = {"KEY-A", "KEY-C"}
-        proc, ini = self._start_proxy(["KEY-A", "KEY-B", "KEY-C"], port)
+        proc, ini, port = self._start_proxy(["KEY-A", "KEY-B", "KEY-C"])
         try:
             used = []
             for _ in range(3):
@@ -360,8 +369,7 @@ class TestKeyRotation(unittest.TestCase):
 
     def test_concurrent_requests_use_distinct_keys(self):
         """Concurrent requests must not all grab the same key; distribution must rotate."""
-        port = 18708
-        proc, ini = self._start_proxy(["KEY-A", "KEY-B", "KEY-C", "KEY-D"], port)
+        proc, ini, port = self._start_proxy(["KEY-A", "KEY-B", "KEY-C", "KEY-D"])
         try:
             results = []
             def worker():
@@ -378,9 +386,8 @@ class TestKeyRotation(unittest.TestCase):
             self._stop_proxy(proc)
 
     def test_concurrent_requests_all_succeed_despite_one_limited(self):
-        port = 18709
         FakeUpstream.limits = {"KEY-A"}
-        proc, ini = self._start_proxy(["KEY-A", "KEY-B", "KEY-C", "KEY-D"], port)
+        proc, ini, port = self._start_proxy(["KEY-A", "KEY-B", "KEY-C", "KEY-D"])
         try:
             results = []
             def worker():

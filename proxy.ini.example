@@ -1,12 +1,215 @@
+; kiosapi-proxy 配置示例
+; 复制为 proxy.ini 后填入真实 key。proxy.ini 已在 .gitignore 中。
+;
+; 路由规则：/<prefix>/... 转发到对应上游，其余路径走默认上游。
+; 例：http://127.0.0.1:8787/kenari/v1/chat/completions
+
 [server]
+; 多个监听地址用逗号或空格分隔；支持 0.0.0.0、::、[::]、[::1]、[::]:8787、127.0.0.1:8787
 host = 127.0.0.1
 port = 8787
+; 危险：绑非回环地址时必须配置 auth_keys，否则拒绝启动
+; host = 0.0.0.0, [::]
+auth_keys =
+; 配置热更新轮询间隔（秒）；增删 key 或上游会自动生效，host/port 需重启
+reload_interval = 2
+; true 时每次转发打印 upstream、key 尾 4 位与状态码（不打印完整 key）
+; 默认 false：不记录详细流量，只打印启动/热更新/限流事件
+log_requests = false
+; 管理端点 key：配置后可用 manage.py 立即热更新，也可 POST /_admin/reload
+; 留空则管理端点关闭；只接受本机回环请求（除非 admin_allow_remote = true）
+; 必须设置随机值，不要使用占位符；示例：admin_key = adm-<随机串>
+admin_key =
+admin_allow_remote = false
+; 401/403 视为该 key 失效并换下一个（默认 true；false 则原样透传）
+rotate_auth_errors = true
+; 请求体上限（字节）；默认 64 MiB，多模态大图/视频按需调大
+max_body_size = 67108864
+; key 顺序持久化文件；留空默认 <配置文件>.state.json；off/none/disabled 关闭
+; state_file = proxy.ini.state.json
+timeout = 120
+
+; 默认上游（无前缀的 /v1/... 走这里）
 base_url = https://kiosapi.com/v1
 
 [keys]
-key1 = sk-xxxx-your-first-key-here
-key2 = sk-xxxx-your-second-key-here
+key1 = sk-xxxx-kiosapi-key1
+key2 = sk-xxxx-kiosapi-key2
 
-; optional: force-override the model field in every request
+; 可选：仅覆盖默认上游的 model
 ;[model]
 ;name = deepseek-v4-flash
+
+; ---------------------------------------------------------------------------
+; 上游定义：新增任意 OpenAI 兼容上游只需追加一个 [upstream:名字] 段
+; keys 逗号分隔；也支持 key1 = ... / key2 = ... 形式
+; 可选字段：model（强制覆盖请求 model）、user_agent、timeout、
+;           auth_style = bearer（默认）/ x-api-key / api-key / both
+;           session_header = 需要稳定会话头的上游（如 x-opencode-session），
+;                            会优先复用客户端的 x-session-id/会话头，否则按代理 key 派生
+;           prefix（默认 /上游名）
+; ---------------------------------------------------------------------------
+
+; opencode 有两个上游，key 通用
+; 1) Go 订阅端点：付费/订阅模型；免费模型不在此端点（400 Model is unavailable）
+;    自 2026-09-06 起必须带 x-opencode-session，否则 400 MissingSessionID
+[upstream:opencode-go]
+base_url = https://opencode.ai/zen/go/v1
+keys = oc_sk-xxxx
+session_header = x-opencode-session
+user_agent = opencode/1.18.16
+
+; 2) Zen 按量端点：付费模型 + 免费模型（-free 后缀）
+;    免费模型有账号级额度，超额 429 FreeUsageLimitError
+[upstream:opencode-zen]
+base_url = https://opencode.ai/zen/v1
+keys = oc_sk-xxxx
+session_header = x-opencode-session
+user_agent = opencode/1.18.16
+
+; Command Code（GOAT / Pro / Max）
+[upstream:commandcode]
+base_url = https://api.commandcode.ai/provider/v1
+keys = user_xxxx
+
+; OpenDesign（Go / Plus / Pro）
+[upstream:opendesign]
+base_url = https://amr-link.open-design.ai/v1
+keys = sk-amr-xxxx
+
+; Kenari
+[upstream:kenari]
+base_url = https://kenari.id/v1
+keys = kn-xxxx
+
+; TaoToken（Coding Plan 入口；Token Plan 用 /token/v1，按量用 /v1）
+[upstream:taotoken]
+base_url = https://api.taotoken.net/coding/v1
+keys = sk-xxxx
+
+; Naga
+[upstream:naga]
+base_url = https://api.naga.ac/v1
+keys = ng-xxxx
+
+; UNOROUTER
+[upstream:unorouter]
+base_url = https://api.unorouter.com/v1
+keys = sk-xxxx
+
+; OpenRouter（客户端 baseURL 填 http://代理/openrouter/api/v1）
+; 200 也可能携带 error.code 业务错误；402 带 Retry-After 时按它退避
+[upstream:openrouter]
+base_url = https://openrouter.ai/api/v1
+keys = sk-or-xxxx
+error_body_path = error.code
+error_body_rotate_codes = 429,402,502,503
+error_body_auth_codes = 401
+
+; Engy（客户端 baseURL 填 http://代理/engy/v1）
+[upstream:engy]
+base_url = https://api.engy.ai/v1
+keys = sk-engy-xxxx
+
+; DeepSeek 官方（客户端 baseURL 填 http://代理/deepseek/v1）
+[upstream:deepseek]
+base_url = https://api.deepseek.com/v1
+keys = sk-xxxx
+
+; 智谱 GLM（客户端 baseURL 填 http://代理/zhipu/api/paas/v4）
+[upstream:zhipu]
+base_url = https://open.bigmodel.cn/api/paas/v4
+keys = xxxx
+
+; Kimi / Moonshot（客户端 baseURL 填 http://代理/kimi/v1）
+[upstream:kimi]
+base_url = https://api.moonshot.cn/v1
+keys = sk-xxxx
+
+; MiniMax（OpenAI 兼容端点可能用 HTTP 200 + base_resp.status_code 表示错误）
+; 1002 频率、1008 余额、1039 TPM、2045-2047 增长限速、2056/2067 套餐额度
+; 1004/2049 鉴权失败；Anthropic 端点则用标准 HTTP 429/529
+[upstream:minimax]
+base_url = https://api.minimax.cn/v1
+keys = sk-xxxx
+error_body_path = base_resp.status_code
+error_body_rotate_codes = 1002,1008,1039,2045,2046,2047,2056,2062,2067
+error_body_auth_codes = 1004,2049
+
+; 腾讯混元（客户端 baseURL 填 http://代理/hunyuan/v1）
+[upstream:hunyuan]
+base_url = https://api.hunyuan.cloud.tencent.com/v1
+keys = sk-xxxx
+
+; 阿里云百炼 / 通义千问（客户端 baseURL 填 http://代理/qwen/compatible-mode/v1）
+[upstream:qwen]
+base_url = https://dashscope.aliyuncs.com/compatible-mode/v1
+keys = sk-xxxx
+
+; 火山方舟 / 豆包（客户端 baseURL 填 http://代理/ark/api/v3）
+[upstream:ark]
+base_url = https://ark.cn-beijing.volces.com/api/v3
+keys = xxxx
+
+; 百度千帆 / 文心一言（客户端 baseURL 填 http://代理/qianfan/v2）
+[upstream:qianfan]
+base_url = https://qianfan.baidubce.com/v2
+keys = bce-v3/ALTAK-xxxx
+
+; 京东云模型服务（客户端 baseURL 填 http://代理/jd/v1）
+; 也可用 JoyAgent：https://agentrs.jd.com/api/saas/openai-u/v1
+[upstream:jd]
+base_url = https://modelservice.jdcloud.com/v1
+keys = xxxx
+
+; 快手万擎（KAT-Coder；客户端 baseURL 填 http://代理/kuaishou/api/gateway/v1/endpoints）
+[upstream:kuaishou]
+base_url = https://wanqing.streamlakeapi.com/api/gateway/v1/endpoints
+keys = xxxx
+
+; 美团 LongCat（客户端 baseURL 填 http://代理/longcat/openai/v1）
+[upstream:longcat]
+base_url = https://api.longcat.chat/openai/v1
+keys = xxxx
+
+; 阶跃星辰 StepFun（客户端 baseURL 填 http://代理/stepfun/v1）
+[upstream:stepfun]
+base_url = https://api.stepfun.com/v1
+keys = xxxx
+
+; 商汤日日新 SenseNova（客户端 baseURL 填 http://代理/sensenova/v1）
+[upstream:sensenova]
+base_url = https://token.sensenova.cn/v1
+keys = sk-xxxx
+
+; CSDN 星图（客户端 baseURL 填 http://代理/csdn/v1）
+[upstream:csdn]
+base_url = https://models.csdn.net/v1
+keys = sk-xxxx
+
+; 小米 MiMo（客户端 baseURL 填 http://代理/xiaomi/v1；官方主推 api-key 头）
+[upstream:xiaomi]
+base_url = https://api.xiaomimimo.com/v1
+keys = sk-xxxx
+auth_style = api-key
+
+; 国家超算互联网 / 智算中心 SCNet（客户端 baseURL 填 http://代理/scnet/api/llm/v1）
+; 中国科技云：https://uni-api.cstcloud.cn/v1；智算平台 coreshub：https://openapi.coreshub.cn/v1
+[upstream:scnet]
+base_url = https://api.scnet.cn/api/llm/v1
+keys = xxxx
+
+; Google Gemini OpenAI 兼容层（客户端 baseURL 填 http://代理/gemini/v1beta/openai）
+[upstream:gemini]
+base_url = https://generativelanguage.googleapis.com/v1beta/openai
+keys = xxxx
+
+; xAI Grok（客户端 baseURL 填 http://代理/xai/v1）
+[upstream:xai]
+base_url = https://api.x.ai/v1
+keys = xxxx
+
+; V-API 中转（客户端 baseURL 填 http://代理/vapi/v1）
+[upstream:vapi]
+base_url = https://api.gpt.ge/v1
+keys = sk-xxxx

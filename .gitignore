@@ -1,5 +1,8 @@
 # secrets - edit proxy.ini.example and rename to proxy.ini
 proxy.ini
+*.ini.tmp
+*.state.json
+*.state.json.tmp
 
 # python
 __pycache__/

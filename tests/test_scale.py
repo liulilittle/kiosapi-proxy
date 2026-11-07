@@ -1,4 +1,4 @@
-import unittest
+﻿import unittest
 import asyncio
 import aiohttp
 import json
@@ -46,6 +46,14 @@ async def rate_limited_upstream(request):
     if not buckets[key].allow():
         return web.Response(status=429, text=json.dumps({"error": {"message": "too many requests", "type": "rate_limit"}}))
     return web.Response(text=json.dumps({"ok": True, "used_key": key}))
+
+
+def free_port():
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
 
 
 def wait_port(port, timeout=10):
@@ -107,12 +115,14 @@ class TestRotationScalesThroughput(unittest.TestCase):
         cls.test_app.router.add_route("*", "/{tail:.*}", rate_limited_upstream)
         cls.runner = web.AppRunner(cls.test_app)
 
+        cls.port = free_port()
+        cls.base_url = "http://127.0.0.1:%d/v1" % cls.port
+
         def serve():
             asyncio.set_event_loop(cls.loop)
             cls.loop.run_until_complete(cls.runner.setup())
-            cls.site = web.TCPSite(cls.runner, "127.0.0.1", 18990)
+            cls.site = web.TCPSite(cls.runner, "127.0.0.1", cls.port)
             cls.loop.run_until_complete(cls.site.start())
-            cls.base_url = "http://127.0.0.1:18990/v1"
             cls.loop.run_forever()
 
         cls.thread = threading.Thread(target=serve, daemon=True)
@@ -120,7 +130,7 @@ class TestRotationScalesThroughput(unittest.TestCase):
         deadline = time.time() + 10
         while time.time() < deadline:
             try:
-                socket.create_connection(("127.0.0.1", 18990), timeout=0.5).close()
+                socket.create_connection(("127.0.0.1", cls.port), timeout=0.5).close()
                 break
             except OSError:
                 time.sleep(0.1)
@@ -131,6 +141,8 @@ class TestRotationScalesThroughput(unittest.TestCase):
     def tearDownClass(cls):
         cls.loop.call_soon_threadsafe(cls.loop.stop)
         cls.thread.join(timeout=5)
+        cls.loop.run_until_complete(cls.runner.cleanup())
+        cls.loop.close()
 
     def setUp(self):
         buckets.clear()
@@ -147,7 +159,7 @@ class TestRotationScalesThroughput(unittest.TestCase):
 
     def test_proxy_rotation_beats_single_key(self):
         keys = ["K1", "K2", "K3", "K4", "K5"]
-        port = 18870
+        port = free_port()
         proc = start_proxy(keys, port, self.base_url)
         try:
             direct = asyncio.run(fire(self.base_url + "/chat/completions", None, 30, 0.05, own_auth="K1"))
@@ -157,6 +169,8 @@ class TestRotationScalesThroughput(unittest.TestCase):
         finally:
             proc.terminate()
             proc.wait(timeout=5)
+            if proc.stdout:
+                proc.stdout.close()
 
 
 if __name__ == "__main__":
