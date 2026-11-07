@@ -508,7 +508,7 @@ def join_upstream_url(base_url, path):
 
 def is_placeholder_key(key):
     lower = (key or "").lower()
-    return key == "REPLACE_ME" or "xxxx" in lower
+    return lower == "replace_me" or "xxxx" in lower
 
 
 def _validate_base_url(value, label):

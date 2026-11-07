@@ -661,6 +661,11 @@ class TestConfigUnit(unittest.TestCase):
         self.assertTrue(self.mod.is_loopback("::ffff:127.0.0.1"))
         self.assertFalse(self.mod.is_loopback("example.com"))
 
+    def test_placeholder_detection_is_case_insensitive(self):
+        for key in ("REPLACE_ME", "replace_me", "Replace_Me"):
+            self.assertTrue(self.mod.is_placeholder_key(key), key)
+        self.assertFalse(self.mod.is_placeholder_key("sk-real-key-123"))
+
     def test_client_key_accepts_bearer_and_x_api_key(self):
         from multidict import CIMultiDict
         bearer = CIMultiDict()
@@ -2064,6 +2069,36 @@ class TestMultiUpstreamIntegration(unittest.TestCase):
             port, "/alpha/v1/chat/completions",
             headers={"Cookie": "session=secret"})[0], 200)
         self.assertNotIn("cookie", FakeUpstream.log[-1]["headers"])
+
+    def test_gzip_bomb_response_rejected(self):
+        import gzip
+        bomb = gzip.compress(b"A" * (2 * 1024 * 1024))
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", 0))
+                self.rfile.read(length)
+                self.send_response(200)
+                self.send_header("Content-Encoding", "gzip")
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(bomb)))
+                self.end_headers()
+                self.wfile.write(bomb)
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        base = "http://127.0.0.1:%d" % server.server_address[1]
+        ini = server_block("{port}", base + "/v1")
+        ini = ini.replace("timeout = 10", "timeout = 10\nmax_response_size = 65536")
+        _, _, port = self._start(ini)
+        status, body = http_call(port, "/v1/chat/completions")
+        self.assertEqual(status, 502)
+        self.assertEqual(json.loads(body)["error"]["type"], "proxy_error")
 
     def test_bind_bracketed_ipv6(self):
         probe = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
