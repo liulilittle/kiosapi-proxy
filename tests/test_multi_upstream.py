@@ -440,6 +440,15 @@ class TestConfigUnit(unittest.TestCase):
         self.assertEqual(cfg.upstreams[0].base_url, "https://a.invalid/v1")
         self.assertEqual(cfg.upstreams[0].keys, ["A1", "A2"])
 
+    def test_load_config_dedupes_keys(self):
+        text = (
+            "[server]\nhost = 127.0.0.1\nport = 8787\n"
+            "base_url = https://x.invalid/v1\n"
+            "[keys]\nkeys = same, same, other\n"
+        )
+        cfg = self._config_from_text(text)
+        self.assertEqual(cfg.default.keys, ["same", "other"])
+
     def test_load_config_default_keys_line(self):
         text = self._config_text().replace("key1 = DEFAULT-KEY", "keys = a, b")
         cfg = self._load_text(text)
@@ -580,6 +589,87 @@ class TestConfigUnit(unittest.TestCase):
         with self.assertRaises(self.mod.ConfigError):
             engine.apply_config(new)
         self.assertIs(engine.config, old)
+
+    def test_load_config_rejects_default_section_inheritance(self):
+        text = (
+            "[DEFAULT]\n"
+            "leak = SECRET\n"
+            "[server]\nhost = 127.0.0.1\nport = 8787\n"
+            "base_url = https://x.invalid/v1\n"
+            "[keys]\nkey1 = K1\n"
+        )
+        with self.assertRaises(self.mod.ConfigError) as ctx:
+            self._config_from_text(text)
+        self.assertIn("DEFAULT", str(ctx.exception))
+
+    def test_load_config_splits_multiline_key_values(self):
+        text = (
+            "[server]\nhost = 127.0.0.1\nport = 8787\n"
+            "base_url = https://x.invalid/v1\n"
+            "[keys]\nkey1 = A,\n  B\n"
+        )
+        cfg = self._config_from_text(text)
+        self.assertEqual(cfg.default.keys, ["A", "B"])
+
+    def test_load_config_accepts_key_prefixed_options(self):
+        text = (
+            "[server]\nhost = 127.0.0.1\nport = 8787\n"
+            "base_url = https://x.invalid/v1\n"
+            "[keys]\nkey1 = A\nkey_backup = B\n"
+        )
+        cfg = self._config_from_text(text)
+        self.assertEqual(cfg.default.keys, ["A", "B"])
+
+    def test_build_upstream_headers_strips_proxy_authorization(self):
+        class Upstream:
+            auth_style = "bearer"
+            session_header = ""
+            user_agent = ""
+        headers = self.mod.build_upstream_headers(
+            {"Proxy-Authorization": "Basic secret", "X-Test": "1"},
+            Upstream(), "K", "application/json")
+        self.assertNotIn("Proxy-Authorization", headers)
+        self.assertEqual(headers["X-Test"], "1")
+
+    def test_build_upstream_headers_strips_spoofed_client_ip(self):
+        class Upstream:
+            auth_style = "bearer"
+            session_header = ""
+            user_agent = ""
+        headers = self.mod.build_upstream_headers(
+            {
+                "X-Real-IP": "1.2.3.4",
+                "True-Client-IP": "1.2.3.4",
+                "CF-Connecting-IP": "1.2.3.4",
+                "X-Client-IP": "1.2.3.4",
+                "X-Cluster-Client-IP": "1.2.3.4",
+                "X-Test": "1",
+            },
+            Upstream(), "K", "application/json")
+        for name in ("X-Real-IP", "True-Client-IP", "CF-Connecting-IP",
+                     "X-Client-IP", "X-Cluster-Client-IP"):
+            self.assertNotIn(name, headers)
+        self.assertEqual(headers["X-Test"], "1")
+
+    def test_reload_keeps_bound_hosts_for_security_gate(self):
+        old = self._config_from_text(
+            "[server]\nhost = 0.0.0.0\nport = 8787\n"
+            "auth_keys = pk-1\nadmin_key = admin-1\n"
+            "[keys]\nkey1 = up-1\n")
+        accepted = self._config_from_text(
+            "[server]\nhost = 127.0.0.1\nport = 8787\n"
+            "auth_keys = pk-2\nadmin_key = admin-1\n"
+            "[keys]\nkey1 = up-1\n")
+        engine = self.mod.ProxyEngine(old)
+        engine.apply_config(accepted)
+        self.assertEqual(engine.config.hosts, ["0.0.0.0"])
+        dangerous = self._config_from_text(
+            "[server]\nhost = 127.0.0.1\nport = 8787\n"
+            "admin_key = admin-1\n[keys]\nkey1 = up-1\n")
+        with self.assertRaises(self.mod.ConfigError):
+            engine.apply_config(dangerous)
+        self.assertEqual(engine.config.hosts, ["0.0.0.0"])
+        self.assertTrue(engine.auth_keys)
 
     def _fake_engine(self, resp):
         class Session:
@@ -767,6 +857,17 @@ class TestConfigUnit(unittest.TestCase):
         kind, status, body, headers = asyncio.run(engine.forward(
             "POST", "/v1/chat/completions", b"{}", "application/json"))
         self.assertEqual(status, 503)
+        self.assertFalse(engine._state_dirty)
+
+    def test_save_state_without_path_clears_dirty(self):
+        cfg = type("Cfg", (), {
+            "base_url": "https://x.invalid/v1", "model": "", "timeout": 10,
+            "keys": ["K"], "auth_keys": [], "state_file": "",
+            "reload_interval": 0, "path": "nonexistent.ini",
+            "log_requests": False, "upstreams": []})()
+        engine = self.mod.ProxyEngine(cfg)
+        engine._state_dirty = True
+        engine.save_state()
         self.assertFalse(engine._state_dirty)
 
     def test_session_does_not_store_upstream_cookies(self):
@@ -1337,18 +1438,35 @@ class TestMultiUpstreamIntegration(unittest.TestCase):
 
     def test_log_requests_prints_masked_keys(self):
         FakeUpstream.behavior = {
-            "A1": {"status": 429, "body": '{"error":{"message":"limited"}}'},
+            "LONGKEY-1111": {"status": 429, "body": '{"error":{"message":"limited"}}'},
         }
         ini = server_block("{port}", self.base + "/default")
         ini = ini.replace("timeout = 10", "timeout = 10\nlog_requests = true")
-        ini += upstream_block("alpha", self.base + "/alpha/v1", ["A1", "A2"])
+        ini += upstream_block("alpha", self.base + "/alpha/v1",
+                              ["LONGKEY-1111", "SHORT"])
         proc, _, port = self._start(ini)
         self.assertEqual(http_call(port, "/alpha/v1/chat/completions")[0], 200)
         proc.terminate()
         proc.wait(timeout=5)
         output = proc.stdout.read().decode("utf-8", errors="ignore")
-        self.assertIn("key=...A1", output)
-        self.assertIn("key=...A2", output)
+        self.assertIn("key=...1111", output)
+        self.assertNotIn("LONGKEY-1111", output)
+        self.assertNotIn("SHORT", output)
+
+    def test_short_key_not_leaked_in_cooldown_log(self):
+        FakeUpstream.behavior = {
+            "AB": {"status": 429, "body": '{"error":{"message":"limited"}}'},
+        }
+        ini = server_block("{port}", self.base + "/default")
+        ini += upstream_block("alpha", self.base + "/alpha/v1",
+                              ["AB", "LONGKEY-2222"])
+        proc, _, port = self._start(ini)
+        self.assertEqual(http_call(port, "/alpha/v1/chat/completions")[0], 200)
+        proc.terminate()
+        proc.wait(timeout=5)
+        output = proc.stdout.read().decode("utf-8", errors="ignore")
+        self.assertNotIn("key=...AB", output)
+        self.assertNotIn("= AB", output)
 
     def test_session_header_generated_and_stable(self):
         ini = server_block("{port}", self.base + "/default")

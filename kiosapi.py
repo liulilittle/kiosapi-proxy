@@ -29,7 +29,8 @@ HOP_BY_HOP = {
     "keep-alive", "proxy-connection", "upgrade", "te", "trailer",
     "authorization", "x-api-key", "api-key", "accept-encoding", "user-agent",
     "cookie", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto",
-    "forwarded", "via", "expect",
+    "x-real-ip", "x-client-ip", "true-client-ip", "cf-connecting-ip",
+    "x-cluster-client-ip", "forwarded", "via", "expect", "proxy-authorization",
 }
 
 FORWARD_RESPONSE_HEADERS = (
@@ -170,6 +171,14 @@ class KeyPool:
 
 def key_fingerprint(key):
     return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+
+def mask_key(key, keep=4):
+    """Show only the tail of a key; never reveal a key shorter than keep*2."""
+    key = key or ""
+    if len(key) <= keep * 2:
+        return "..."
+    return "..." + key[-keep:]
 
 
 def constant_time_equal(a, b):
@@ -475,6 +484,9 @@ def load_config(path):
         raise ConfigError("invalid config: %s" % ex)
     if not read:
         raise ConfigError("config file not found or unreadable: " + path)
+    if cp.defaults():
+        raise ConfigError("[DEFAULT] options are not supported; put shared values "
+                          "in [server] or each upstream section")
     if "server" not in cp:
         raise ConfigError("missing [server] section: " + path)
     if "keys" not in cp:
@@ -490,8 +502,11 @@ def load_config(path):
     if keys_line:
         default_keys = split_list(keys_line)
     else:
-        default_keys = [v.strip() for k, v in keys_sec.items()
-                        if k.lower().startswith("key") and k.lower() != "keys" and v.strip()]
+        default_keys = []
+        for k, v in keys_sec.items():
+            if k.lower() == "keys" or not k.lower().startswith("key"):
+                continue
+            default_keys.extend(split_list(v))
 
     timeout = _int(server.get("timeout", "60"), "server timeout")
     if timeout <= 0:
@@ -560,8 +575,11 @@ def load_config(path):
         seen_prefixes[prefix] = section
         keys = split_list(sec.get("keys", ""))
         if not keys:
-            keys = [v.strip() for k, v in sec.items()
-                    if k.lower().startswith("key") and k.lower() != "keys" and v.strip()]
+            for k, v in sec.items():
+                if k.lower() == "keys" or not k.lower().startswith("key"):
+                    continue
+                keys.extend(split_list(v))
+        keys = list(dict.fromkeys(keys))
         auth_style = sec.get("auth_style", "bearer").strip().lower()
         if auth_style not in AUTH_STYLES:
             raise ConfigError("[" + section + "] invalid auth_style: " + auth_style)
@@ -702,6 +720,7 @@ class ProxyEngine:
 
     def save_state(self):
         if not self.state_path:
+            self._state_dirty = False
             return
         data = {"version": 1, "upstreams": {}}
         for name, pool in self._pools():
@@ -790,8 +809,8 @@ class ProxyEngine:
 
     def _log_attempt(self, upstream, key, status):
         if getattr(self.config, "log_requests", False):
-            print("[kiosapi-proxy] request upstream=%s key=...%s status=%s"
-                  % (upstream.name, key[-4:], status), flush=True)
+            print("[kiosapi-proxy] request upstream=%s key=%s status=%s"
+                  % (upstream.name, mask_key(key), status), flush=True)
 
     async def forward(self, method, path, body, content_type, headers=None):
         headers = headers or {}
@@ -837,8 +856,8 @@ class ProxyEngine:
                             code_text = str(code)
                             if code_text in upstream.error_body_auth_codes:
                                 if upstream.pool.mark_invalid(key):
-                                    print("[kiosapi-proxy] upstream=%s key=...%s stream body auth error (%s), cooling"
-                                          % (upstream.name, key[-4:], code_text), flush=True)
+                                    print("[kiosapi-proxy] upstream=%s key=%s stream body auth error (%s), cooling"
+                                          % (upstream.name, mask_key(key), code_text), flush=True)
                                 upstream.pool.advance_past(key)
                                 last_status, last_body = 401, prefix
                                 last_headers = resp.headers.copy()
@@ -846,8 +865,8 @@ class ProxyEngine:
                                 continue
                             if code_text in upstream.error_body_rotate_codes:
                                 if upstream.pool.mark_limited(key, AUTH_COOLDOWN):
-                                    print("[kiosapi-proxy] upstream=%s key=...%s stream body limit (%s), cooling"
-                                          % (upstream.name, key[-4:], code_text), flush=True)
+                                    print("[kiosapi-proxy] upstream=%s key=%s stream body limit (%s), cooling"
+                                          % (upstream.name, mask_key(key), code_text), flush=True)
                                 upstream.pool.advance_past(key)
                                 last_status, last_body = 429, prefix
                                 last_headers = resp.headers.copy()
@@ -868,16 +887,16 @@ class ProxyEngine:
                         code_text = str(code)
                         if code_text in upstream.error_body_auth_codes:
                             if upstream.pool.mark_invalid(key):
-                                print("[kiosapi-proxy] upstream=%s key=...%s body auth error (%s), cooling"
-                                      % (upstream.name, key[-4:], code_text), flush=True)
+                                print("[kiosapi-proxy] upstream=%s key=%s body auth error (%s), cooling"
+                                      % (upstream.name, mask_key(key), code_text), flush=True)
                             upstream.pool.advance_past(key)
                             last_status, last_body = 401, data
                             last_headers = resp_headers
                             continue
                         if code_text in upstream.error_body_rotate_codes:
                             if upstream.pool.mark_limited(key, AUTH_COOLDOWN):
-                                print("[kiosapi-proxy] upstream=%s key=...%s body limit (%s), cooling"
-                                      % (upstream.name, key[-4:], code_text), flush=True)
+                                print("[kiosapi-proxy] upstream=%s key=%s body limit (%s), cooling"
+                                      % (upstream.name, mask_key(key), code_text), flush=True)
                             upstream.pool.advance_past(key)
                             last_status, last_body = 429, data
                             last_headers = resp_headers
@@ -886,8 +905,8 @@ class ProxyEngine:
                 if not is_limit_error(resp.status, data):
                     if is_auth_error(resp.status, data) and self.rotate_auth_errors:
                         if upstream.pool.mark_invalid(key):
-                            print("[kiosapi-proxy] upstream=%s key=...%s auth error (%s), cooling"
-                                  % (upstream.name, key[-4:], resp.status), flush=True)
+                            print("[kiosapi-proxy] upstream=%s key=%s auth error (%s), cooling"
+                                  % (upstream.name, mask_key(key), resp.status), flush=True)
                         upstream.pool.advance_past(key)
                         last_status, last_body = resp.status, data
                         last_headers = resp_headers
@@ -898,8 +917,8 @@ class ProxyEngine:
 
                 cooldown = cooldown_for(resp.status, data, retry_after)
                 if upstream.pool.mark_limited(key, cooldown):
-                    print("[kiosapi-proxy] upstream=%s key=...%s limited (%s), cooling"
-                          % (upstream.name, key[-4:], resp.status), flush=True)
+                    print("[kiosapi-proxy] upstream=%s key=%s limited (%s), cooling"
+                          % (upstream.name, mask_key(key), resp.status), flush=True)
                 upstream.pool.advance_past(key)
                 last_status, last_body = resp.status, data
                 last_headers = resp_headers
@@ -914,10 +933,12 @@ class ProxyEngine:
                 if is_certificate_error(ex):
                     upstream.pool.advance_past(key)
                     last_status, last_body = 502, json.dumps(
-                        {"error": {"message": str(ex), "type": "certificate_error"}}).encode()
+                        {"error": {"message": "upstream certificate error",
+                                   "type": "certificate_error"}}).encode()
                     continue
                 return ("plain", 502, json.dumps(
-                    {"error": {"message": str(ex), "type": "proxy_error"}}).encode(), None)
+                    {"error": {"message": "upstream connection error",
+                               "type": "proxy_error"}}).encode(), None)
             except asyncio.CancelledError:
                 if resp is not None and not released:
                     try:
@@ -943,10 +964,11 @@ class ProxyEngine:
         if new_config.max_body_size != old.max_body_size:
             print("[kiosapi-proxy] max_body_size changes require restart; "
                   "keeping current limit", flush=True)
-        if not new_config.auth_keys and any(not is_loopback(h) for h in old.hosts):
+        bound_hosts = list(old.hosts)
+        if not new_config.auth_keys and any(not is_loopback(h) for h in bound_hosts):
             raise ConfigError(
                 "auth_keys is empty while bound to non-loopback address; reload rejected")
-        if any(not is_loopback(h) for h in old.hosts) and any(
+        if any(not is_loopback(h) for h in bound_hosts) and any(
                 is_placeholder_key(key) for key in new_config.auth_keys):
             raise ConfigError(
                 "auth_keys contains a placeholder while bound to non-loopback "
@@ -955,6 +977,8 @@ class ProxyEngine:
                 is_placeholder_key(new_config.admin_key):
             raise ConfigError(
                 "admin_allow_remote requires a non-placeholder admin_key; reload rejected")
+        new_config.hosts = bound_hosts
+        new_config.port = old.port
         self.config = new_config
         self.auth_keys = list(new_config.auth_keys)
         self.admin_key = getattr(new_config, "admin_key", "")

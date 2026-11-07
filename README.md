@@ -38,7 +38,7 @@ keys = kn-aaaa, kn-bbbb
 [upstream:zhipu]
 base_url = https://open.bigmodel.cn/api/paas/v4
 keys = xxxx
-key2 = xxxx               ; key1/key2 写法同样支持
+; 也可改为 key1 = ..., key2 = ...；同一 section 里 keys = 与 keyN = 二选一
 ```
 
 上游可选字段：`prefix`（默认 `/上游名`）、`model`（强制覆盖请求里的 model）、`user_agent`、`timeout`、`auth_style`（`bearer` 默认 / `x-api-key` / `api-key` / `both`）、`session_header`（需要稳定会话头的上游，如 `x-opencode-session`）。

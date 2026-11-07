@@ -35,7 +35,9 @@ import kiosapi
 def mask_key(key, reveal=False):
     if reveal:
         return key
-    if len(key) <= 8:
+    if len(key) <= 4:
+        return "..."
+    if len(key) <= 12:
         return "..." + key[-4:]
     return key[:6] + "..." + key[-4:]
 
@@ -126,40 +128,45 @@ def strip_inline_comment(value):
 
 
 def section_keys(lines, name):
-    start, end = find_section(lines, name)
-    if name == "keys":
-        for i in range(start + 1, end):
-            match = re.match(r"^\s*keys\s*=\s*(.*)$", lines[i])
-            if match:
-                return kiosapi.split_list(strip_inline_comment(match.group(1)))
+    cp = configparser.ConfigParser(
+        interpolation=None, inline_comment_prefixes=(";", "#"))
+    try:
+        cp.read_string("\n".join(lines) + "\n")
+    except configparser.Error as ex:
+        raise ValueError("invalid config: %s" % ex)
+    if not cp.has_section(name):
+        raise KeyError("section not found: [" + name + "]")
+    if cp.defaults():
+        raise ValueError("[DEFAULT] options are not supported")
+    sec = cp[name]
+    keys_line = sec.get("keys", "").strip()
+    if keys_line:
+        keys = kiosapi.split_list(keys_line)
+    else:
         keys = []
-        for i in range(start + 1, end):
-            m = re.match(r"^\s*key\d+\s*=\s*(.*)$", lines[i])
-            if m:
-                value = strip_inline_comment(m.group(1))
-                if value:
-                    keys.append(value)
-        return keys
-    for i in range(start + 1, end):
-        m = re.match(r"^\s*keys\s*=\s*(.*)$", lines[i])
-        if m:
-            return kiosapi.split_list(strip_inline_comment(m.group(1)))
-    keys = []
-    for i in range(start + 1, end):
-        m = re.match(r"^\s*key\d+\s*=\s*(.*)$", lines[i])
-        if m:
-            value = strip_inline_comment(m.group(1))
-            if value:
-                keys.append(value)
-    return keys
+        for option, value in sec.items():
+            if option.lower() == "keys" or not option.lower().startswith("key"):
+                continue
+            keys.extend(kiosapi.split_list(value))
+    return list(dict.fromkeys(keys))
 
 
 def set_section_keys(lines, name, keys):
     start, end = find_section(lines, name)
     body = []
+    skip_continuation = False
     for i in range(start + 1, end):
         line = lines[i]
-        if re.match(r"^\s*keys\s*=", line) or re.match(r"^\s*key\d+\s*=", line):
+        if skip_continuation:
+            stripped = line.strip()
+            if not stripped or stripped.startswith((";", "#")):
+                body.append(line)
+                continue
+            if line[:1].isspace():
+                continue
+            skip_continuation = False
+        if re.match(r"^\s*(keys|key\S*)\s*[=:]", line, re.IGNORECASE):
+            skip_continuation = True
             continue
         body.append(line)
     if name == "keys":
@@ -197,6 +204,8 @@ def load_parser(path):
         raise ValueError("cannot decode config %s: %s" % (path, ex))
     except configparser.Error as ex:
         raise ValueError("invalid config: %s" % ex)
+    if cp.defaults():
+        raise ValueError("[DEFAULT] options are not supported")
     if "server" not in cp:
         raise ValueError("missing [server] section: " + path)
     return cp

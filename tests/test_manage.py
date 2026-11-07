@@ -98,9 +98,16 @@ class TestTextEditing(unittest.TestCase):
         self.assertEqual(self.mod.all_upstreams(self.lines), ["default", "kenari", "demo"])
 
     def test_mask_key(self):
-        self.assertEqual(self.mod.mask_key("kn-aaa111"), "kn-aaa...a111")
+        self.assertEqual(self.mod.mask_key("abcd"), "...")
         self.assertEqual(self.mod.mask_key("short"), "...hort")
+        self.assertEqual(self.mod.mask_key("kn-aaa111"), "...a111")
+        self.assertEqual(self.mod.mask_key("abcdefghij"), "...ghij")
+        self.assertEqual(self.mod.mask_key("abcdefghijkl"), "...ijkl")
+        self.assertEqual(self.mod.mask_key("abcdefghijklm"), "abcdef...jklm")
         self.assertEqual(self.mod.mask_key("kn-aaa111", reveal=True), "kn-aaa111")
+        for key in ("abcd", "abcde", "abcdefghi", "abcdefghij", "abcdefghijklm"):
+            self.assertNotEqual(self.mod.mask_key(key), key)
+            self.assertNotIn(key, self.mod.mask_key(key))
 
 
 class TestCli(unittest.TestCase):
@@ -156,7 +163,8 @@ class TestCli(unittest.TestCase):
         code, out = self.run_cli("add-key", "kenari", "kn-ccc333", "--no-reload")
         self.assertEqual(code, 1)
         self.assertIn("invalid config", out)
-        self.assertNotIn("kn-ccc333", self.read_keys("upstream:kenari"))
+        with open(self.ini, encoding="utf-8") as fh:
+            self.assertNotIn("kn-ccc333", fh.read())
 
     def test_probe_does_not_follow_redirects(self):
         hits = []
@@ -377,7 +385,7 @@ class TestCli(unittest.TestCase):
     def test_list_masks_keys(self):
         code, out = self.run_cli("list")
         self.assertEqual(code, 0)
-        self.assertIn("kn-aaa...a111", out)
+        self.assertIn("...a111", out)
         self.assertNotIn("kn-aaa111", out)
         self.assertNotIn("sk-kiosapi-aaaa", out)
 
@@ -391,7 +399,7 @@ class TestCli(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertNotIn("kn-aaa111", out)
         self.assertNotIn("kn-bbb222", out)
-        self.assertIn("kn-aaa...a111", out)
+        self.assertIn("...a111", out)
 
     def test_validate(self):
         code, out = self.run_cli("validate")
@@ -409,7 +417,7 @@ class TestCli(unittest.TestCase):
             json.dump(state, fh)
         code, out = self.run_cli("state")
         self.assertEqual(code, 0)
-        self.assertIn("kn-bbb...b222 -> kn-aaa...a111", out)
+        self.assertIn("...b222 -> ...a111", out)
 
     def test_check_against_local_upstream(self):
         class Handler(BaseHTTPRequestHandler):
@@ -487,6 +495,83 @@ keys = A1, A2
         self.assertIn("matches 2", out)
         self.assertEqual(len(self.read_keys("upstream:kenari")), 2)
 
+    def test_add_key_keeps_existing_keys_after_empty_keys_line(self):
+        with open(self.ini, "w", encoding="utf-8") as fh:
+            fh.write(SAMPLE.replace("key1 = sk-kiosapi-aaaa\nkey2 = sk-kiosapi-bbbb",
+                                    "keys =\nkey1 = sk-kiosapi-aaaa\n"
+                                    "key2 = sk-kiosapi-bbbb"))
+        code, out = self.run_cli("add-key", "default", "sk-new", "--no-reload")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.read_keys("keys"),
+                         ["sk-kiosapi-aaaa", "sk-kiosapi-bbbb", "sk-new"])
+
+    def test_add_key_removes_multiline_key_continuation(self):
+        with open(self.ini, "w", encoding="utf-8") as fh:
+            fh.write(SAMPLE.replace("keys = kn-aaa111, kn-bbb222",
+                                    "keys = kn-aaa111,\n    kn-bbb222"))
+        code, out = self.run_cli("add-key", "kenari", "kn-ccc333", "--no-reload")
+        self.assertEqual(code, 0, out)
+        code, out = self.run_cli("validate")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.read_keys("upstream:kenari"),
+                         ["kn-aaa111", "kn-bbb222", "kn-ccc333"])
+        with open(self.ini, encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertEqual(text.count("kn-bbb222"), 1)
+
+    def test_remove_key_drops_continuation_after_interleaved_comment(self):
+        with open(self.ini, "w", encoding="utf-8") as fh:
+            fh.write(SAMPLE.replace(
+                "[upstream:kenari]\nbase_url = https://kenari.id/v1\n"
+                "; keep this comment\nkeys = kn-aaa111, kn-bbb222",
+                "[upstream:kenari]\nkeys = kn-aaa111,\n    kn-bbb222\n"
+                "; note\n    kn-ccc333\nbase_url = https://kenari.id/v1"))
+        code, out = self.run_cli("remove-key", "kenari", "kn-aaa111", "--no-reload")
+        self.assertEqual(code, 0, out)
+        code, out = self.run_cli("validate")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.read_keys("upstream:kenari"),
+                         ["kn-bbb222", "kn-ccc333"])
+        with open(self.ini, encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertNotIn("kn-aaa111", text)
+
+    def test_section_keys_prefers_keys_line_over_key_options(self):
+        lines = ("[keys]\nkeys = A1, A2\nkey1 = B1\n"
+                 "[upstream:alpha]\nbase_url = https://a.invalid/v1\n"
+                 "keys = C1\nkey1 = D1\n").splitlines()
+        self.assertEqual(self.mod.section_keys(lines, "keys"), ["A1", "A2"])
+        self.assertEqual(self.mod.section_keys(lines, "upstream:alpha"), ["C1"])
+
+    def test_cli_rejects_default_section(self):
+        with open(self.ini, "w", encoding="utf-8") as fh:
+            fh.write(SAMPLE.replace("[server]", "[DEFAULT]\nleak = SECRET\n[server]"))
+        code, out = self.run_cli("list")
+        self.assertEqual(code, 1)
+        self.assertIn("DEFAULT", out)
+
+    def test_section_keys_matches_proxy_key_option_rules(self):
+        lines = ("[keys]\nkeys =\nkey1 = A\nkey_backup = B\nkey2 = C\n"
+                 "[upstream:alpha]\nbase_url = https://a.invalid/v1\n"
+                 "key1 = X\n").splitlines()
+        self.assertEqual(self.mod.section_keys(lines, "keys"), ["A", "B", "C"])
+        self.assertEqual(self.mod.section_keys(lines, "upstream:alpha"), ["X"])
+
+    def test_section_keys_handles_colon_separator_and_multiline(self):
+        lines = ("[keys]\nkey1: A\nkey2 = B\n  C\n").splitlines()
+        self.assertEqual(self.mod.section_keys(lines, "keys"), ["A", "B", "C"])
+
+    def test_write_lines_does_not_duplicate_keys_when_rewriting(self):
+        code, _ = self.run_cli("add-key", "default", "sk-new", "--no-reload")
+        self.assertEqual(code, 0)
+        with open(self.ini, encoding="utf-8") as fh:
+            self.assertIn("sk-new", fh.read())
+        code, _ = self.run_cli("remove-key", "default", "sk-new", "--no-reload")
+        self.assertEqual(code, 0)
+        with open(self.ini, encoding="utf-8") as fh:
+            second = fh.read()
+        self.assertEqual(second.count("key1 ="), 1)
+        self.assertNotIn("sk-new", second)
     def test_remove_key_empty_target_refused(self):
         with open(self.ini, "w", encoding="utf-8") as fh:
             fh.write(SAMPLE.replace("kn-aaa111, kn-bbb222", "kn-only"))
@@ -552,7 +637,7 @@ keys = REPLACE_ME, kn-real
             json.dump(state, fh)
         code, out = self.run_cli("state")
         self.assertEqual(code, 0)
-        self.assertIn("kn-bbb...b222 -> kn-aaa...a111", out)
+        self.assertIn("...b222 -> ...a111", out)
 
     def test_state_non_object_file(self):
         with open(self.ini + ".state.json", "w", encoding="utf-8") as fh:

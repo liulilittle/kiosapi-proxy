@@ -216,7 +216,7 @@ class TestCertificateRetry(unittest.TestCase):
 
         class FakeSession:
             async def request(self, method, url, data, headers, **kwargs):
-                raise OSError("connection refused")
+                raise OSError("connection refused to SECRET-HOST")
 
         cfg = type("Cfg", (), {"base_url": "https://up.example/v1", "model": "", "timeout": 10, "keys": ["KEY-A", "KEY-B"]})()
         engine = mod.ProxyEngine(cfg)
@@ -227,6 +227,8 @@ class TestCertificateRetry(unittest.TestCase):
             engine.forward("POST", "/v1/chat/completions", json.dumps({"model": "m"}).encode(), "application/json"))
         self.assertEqual(status, 502)
         self.assertEqual(json.loads(body)["error"]["type"], "proxy_error")
+        self.assertNotIn("connection refused", body.decode("utf-8"))
+        self.assertNotIn("SECRET-HOST", body.decode("utf-8"))
 
 
 class TestKeyRotation(unittest.TestCase):
