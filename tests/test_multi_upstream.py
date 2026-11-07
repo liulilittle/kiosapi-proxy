@@ -187,6 +187,27 @@ class TestConfigUnit(unittest.TestCase):
     def test_parse_hosts_supports_ipv4_and_ipv6(self):
         self.assertEqual(self.mod.parse_hosts("0.0.0.0, ::"), ["0.0.0.0", "::"])
 
+    def test_fuzz_load_config_raises_only_config_error(self):
+        import random
+        rng = random.Random(20261108)
+        fragments = [
+            "[server]\n", "[keys]\n", "[upstream:alpha]\n", "[DEFAULT]\n",
+            "base_url = https://x.invalid/v1\n", "auth_keys = pk-1\n",
+            "keys = k1,k2\n", "port = 1\n", "timeout = 0\n", "prefix = /a\n",
+            "base_url = ftp://x\n", "key1 = a b\n", "\u4ee3\u7406\n", "\x00\n",
+        ]
+        for _ in range(150):
+            text = "".join(rng.choice(fragments) for _ in range(rng.randint(0, 10)))
+            with tempfile.NamedTemporaryFile(
+                    "w", suffix=".ini", delete=False, encoding="utf-8") as fh:
+                fh.write(text)
+                name = fh.name
+            self.addCleanup(os.unlink, name)
+            try:
+                self.mod.load_config(name)
+            except self.mod.ConfigError:
+                pass
+
     def test_parse_hosts_defaults_to_loopback(self):
         self.assertEqual(self.mod.parse_hosts(""), ["127.0.0.1"])
 
@@ -962,6 +983,18 @@ class TestConfigUnit(unittest.TestCase):
         resp = Resp()
         with self.assertRaises(self.mod.ResponseTooLarge):
             asyncio.run(self.mod.read_body_limited(resp, 100))
+
+    def test_read_body_limited_ignores_content_length_for_head(self):
+        class Resp:
+            status = 200
+            method = "HEAD"
+            headers = {"Content-Length": str(10 ** 9)}
+
+            async def read(self):
+                return b""
+
+        self.assertEqual(
+            asyncio.run(self.mod.read_body_limited(Resp(), 100)), b"")
 
     def test_read_body_limited_stops_at_limit(self):
         class Content:

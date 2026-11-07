@@ -344,7 +344,7 @@ def extract_body_error(body, path):
 
 async def read_body_limited(resp, limit):
     """Read a non-stream body, refusing payloads larger than limit bytes."""
-    if limit and limit > 0:
+    if limit and limit > 0 and getattr(resp, "method", "") != "HEAD":
         raw = resp.headers.get("Content-Length")
         if raw is not None:
             try:

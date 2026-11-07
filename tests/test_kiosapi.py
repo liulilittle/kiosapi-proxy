@@ -147,6 +147,36 @@ class TestJoinUpstreamURL(unittest.TestCase):
                 "/v1/models?x=1"),
             "https://x.invalid/v1/models?x=1&tag=a&tag=b")
 
+    def test_fuzz_join_upstream_url_invariants(self):
+        import importlib.util
+        import random
+        from urllib.parse import urlsplit
+        spec = importlib.util.spec_from_file_location("kiosapi", SCRIPT)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        rng = random.Random(20261108)
+        alphabet = "/abcv1?&=%.-_#中文\t"
+        for _ in range(300):
+            base_path = "/" + "".join(
+                rng.choice(alphabet) for _ in range(rng.randint(0, 12)))
+            base_query = "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 10)))
+            client = "/" + "".join(
+                rng.choice(alphabet) for _ in range(rng.randint(0, 12)))
+            base = "https://h.invalid" + base_path
+            if base_query:
+                base += "?" + base_query
+            out = mod.join_upstream_url(base, client)
+            parts = urlsplit(out)
+            self.assertEqual((parts.scheme, parts.netloc), ("https", "h.invalid"))
+            self.assertEqual(parts.fragment, "")
+            self.assertNotIn("?", parts.path)
+            self.assertNotIn("#", parts.path)
+            client_query = urlsplit(client).query
+            if client_query:
+                self.assertTrue(
+                    parts.query == client_query or
+                    parts.query.startswith(client_query + "&"))
+
     def test_trailing_slash_base(self):
         import importlib.util
         spec = importlib.util.spec_from_file_location("kiosapi", SCRIPT)
