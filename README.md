@@ -51,7 +51,7 @@ keys = xxxx
 | Go 订阅 | `https://opencode.ai/zen/go/v1` | 付费/订阅模型；免费模型在此端点返回 400 |
 | Zen 按量 | `https://opencode.ai/zen/v1` | 付费模型 + `-free` 免费模型 |
 
-两个端点自 2026-09-06 起要求 `x-opencode-session`，缺失返回 `400 MissingSessionID`。代理在 `session_header = x-opencode-session` 时会自动补齐：优先复用客户端的 `x-session-id`/`x-opencode-session`（同一会话稳定），否则按代理 key 派生稳定值。
+两个端点自 2026-09-06 起要求 `x-opencode-session`，缺失返回 `400 MissingSessionID`。代理在 `session_header = x-opencode-session` 时会自动补齐：优先复用客户端的 `x-session-id`/`x-opencode-session`（同一会话稳定），否则按代理 key 派生进程内稳定值（进程重启后会变化；需跨重启稳定请显式发送会话头）。
 
 实测（2026-11-07）：`opencode-go` 下 key1 触发 `429 GoUsageLimitError`（月度限额）后，代理自动切到 key2 并返回 200，非流式与流式均成功。
 

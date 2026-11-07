@@ -695,6 +695,21 @@ class TestConfigUnit(unittest.TestCase):
             self.assertNotIn(name, headers)
         self.assertEqual(headers["X-Test"], "1")
 
+    def test_derived_session_is_process_local(self):
+        class Upstream:
+            auth_style = "bearer"
+            session_header = "x-opencode-session"
+            user_agent = ""
+
+        first = self.mod.build_upstream_headers(
+            {}, Upstream(), "client-key", "application/json"
+        )["x-opencode-session"]
+        second = load_module().build_upstream_headers(
+            {}, Upstream(), "client-key", "application/json"
+        )["x-opencode-session"]
+        self.assertTrue(first.startswith("ses_"))
+        self.assertFalse(first == second)
+
     def test_mask_key_hides_short_keys(self):
         self.assertEqual(self.mod.mask_key(""), "...")
         self.assertEqual(self.mod.mask_key("abcd"), "...")
