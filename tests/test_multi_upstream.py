@@ -358,6 +358,21 @@ class TestConfigUnit(unittest.TestCase):
         self.assertTrue(self.mod.is_loopback("[::1]"))
         self.assertFalse(self.mod.is_loopback("[::]"))
 
+    def test_ipv6_wildcard_socket_is_v6only(self):
+        probe = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        try:
+            probe.bind(("::1", 0))
+        except OSError:
+            self.skipTest("IPv6 unavailable")
+        finally:
+            probe.close()
+        sock = self.mod.make_listen_socket("::", 0)
+        try:
+            self.assertEqual(
+                sock.getsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY), 1)
+        finally:
+            sock.close()
+
     def _config_text(self, extra=""):
         return server_block(8787, "https://kiosapi.com/v1") + extra
 
