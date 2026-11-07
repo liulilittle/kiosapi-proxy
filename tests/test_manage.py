@@ -99,7 +99,8 @@ class TestTextEditing(unittest.TestCase):
 
     def test_mask_key(self):
         self.assertEqual(self.mod.mask_key("abcd"), "...")
-        self.assertEqual(self.mod.mask_key("short"), "...hort")
+        self.assertEqual(self.mod.mask_key("short"), "...")
+        self.assertEqual(self.mod.mask_key("abcdefgh"), "...")
         self.assertEqual(self.mod.mask_key("kn-aaa111"), "...a111")
         self.assertEqual(self.mod.mask_key("abcdefghij"), "...ghij")
         self.assertEqual(self.mod.mask_key("abcdefghijkl"), "...ijkl")
@@ -560,6 +561,52 @@ keys = A1, A2
     def test_section_keys_handles_colon_separator_and_multiline(self):
         lines = ("[keys]\nkey1: A\nkey2 = B\n  C\n").splitlines()
         self.assertEqual(self.mod.section_keys(lines, "keys"), ["A", "B", "C"])
+
+    def test_section_keys_resolves_padded_upstream_header(self):
+        lines = ("[keys]\nkey1 = A\n"
+                 "[upstream: alpha ]\nbase_url = https://a.invalid/v1\n"
+                 "keys = X, Y\n").splitlines()
+        self.assertEqual(self.mod.section_keys(lines, "keys"), ["A"])
+        self.assertEqual(self.mod.section_keys(lines, "upstream:alpha"),
+                         ["X", "Y"])
+
+    def test_section_keys_rejects_padded_default_header_like_proxy(self):
+        lines = ("[ keys ]\nkey1 = A\n").splitlines()
+        with self.assertRaises(KeyError):
+            self.mod.section_keys(lines, "keys")
+
+    def test_cli_rejects_duplicate_padded_upstream_sections(self):
+        with open(self.ini, "w", encoding="utf-8") as fh:
+            fh.write(SAMPLE.replace(
+                "[upstream:demo]",
+                "[upstream: kenari ]\nbase_url = https://other.invalid/v1\n"
+                "keys = dup-1\n\n[upstream:demo]"))
+        code, out = self.run_cli("list")
+        self.assertEqual(code, 1)
+        self.assertIn("duplicate", out.lower())
+        code, out = self.run_cli("add-key", "kenari", "kn-new", "--no-reload")
+        self.assertEqual(code, 1)
+        self.assertIn("duplicate", out.lower())
+
+    def test_cli_commands_accept_padded_upstream_header(self):
+        with open(self.ini, "w", encoding="utf-8") as fh:
+            fh.write(SAMPLE.replace(
+                "[upstream:kenari]", "[upstream: kenari ]"))
+        code, out = self.run_cli("add-key", "kenari", "kn-ccc333", "--no-reload")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.read_keys("upstream:kenari"),
+                         ["kn-aaa111", "kn-bbb222", "kn-ccc333"])
+        code, out = self.run_cli("list", "--json")
+        self.assertEqual(code, 0, out)
+        rows = json.loads(out)
+        kenari = [r for r in rows if r["upstream"] == "kenari"][0]
+        self.assertEqual(kenari["base_url"], "https://kenari.id/v1")
+        code, out = self.run_cli("show", "kenari", "--json")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(json.loads(out)["base_url"], "https://kenari.id/v1")
+        code, out = self.run_cli("remove-key", "kenari", "kn-ccc333", "--no-reload")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("kn-ccc333", self.read_keys("upstream:kenari"))
 
     def test_write_lines_does_not_duplicate_keys_when_rewriting(self):
         code, _ = self.run_cli("add-key", "default", "sk-new", "--no-reload")

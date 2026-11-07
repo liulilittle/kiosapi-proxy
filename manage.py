@@ -35,7 +35,7 @@ import kiosapi
 def mask_key(key, reveal=False):
     if reveal:
         return key
-    if len(key) <= 4:
+    if len(key) <= 8:
         return "..."
     if len(key) <= 12:
         return "..." + key[-4:]
@@ -102,12 +102,42 @@ def write_lines(path, lines):
     os.replace(tmp, path)
 
 
+def normalize_section(text):
+    """Mirror kiosapi: only upstream names are stripped; other sections are exact."""
+    if text.startswith("upstream:"):
+        return "upstream:" + text.split(":", 1)[1].strip()
+    return text
+
+
+def parser_section(cp, name):
+    """Map a logical section name onto its literal header in the parsed config."""
+    if cp.has_section(name):
+        return name
+    target = normalize_section(name)
+    for existing in cp.sections():
+        if normalize_section(existing) == target:
+            return existing
+    return None
+
+
+def _find_section_name(lines, name):
+    """Return the literal header text of the matching section (as configparser sees it)."""
+    header_re = re.compile(r"^\s*\[([^\]]+)\]")
+    target = normalize_section(name)
+    for line in lines:
+        match = header_re.match(line)
+        if match and normalize_section(match.group(1)) == target:
+            return match.group(1)
+    raise KeyError("section not found: [" + name + "]")
+
+
 def find_section(lines, name):
     header_re = re.compile(r"^\s*\[([^\]]+)\]")
+    target = normalize_section(name)
     start = None
     for i, line in enumerate(lines):
         match = header_re.match(line)
-        if match and match.group(1).strip() == name:
+        if match and normalize_section(match.group(1)) == target:
             start = i
             break
     if start is None:
@@ -134,11 +164,12 @@ def section_keys(lines, name):
         cp.read_string("\n".join(lines) + "\n")
     except configparser.Error as ex:
         raise ValueError("invalid config: %s" % ex)
-    if not cp.has_section(name):
-        raise KeyError("section not found: [" + name + "]")
     if cp.defaults():
         raise ValueError("[DEFAULT] options are not supported")
-    sec = cp[name]
+    section = _find_section_name(lines, name)
+    if not cp.has_section(section):
+        raise KeyError("section not found: [" + name + "]")
+    sec = cp[section]
     keys_line = sec.get("keys", "").strip()
     if keys_line:
         keys = kiosapi.split_list(keys_line)
@@ -208,6 +239,16 @@ def load_parser(path):
         raise ValueError("[DEFAULT] options are not supported")
     if "server" not in cp:
         raise ValueError("missing [server] section: " + path)
+    if "keys" not in cp:
+        raise ValueError("missing [keys] section: " + path)
+    seen = set()
+    for section in cp.sections():
+        if not section.startswith("upstream:"):
+            continue
+        name = normalize_section(section).split(":", 1)[1]
+        if name in seen:
+            raise ValueError("duplicate upstream name: " + name)
+        seen.add(name)
     return cp
 
 
@@ -249,7 +290,9 @@ def cmd_list(args):
         if name == "default":
             base = cp.get("server", "base_url", fallback="")
         else:
-            base = cp.get(sec, "base_url", fallback="")
+            section = parser_section(cp, sec)
+            base = cp.get(section, "base_url", fallback="") \
+                if section is not None else ""
         rows.append({
             "upstream": name,
             "base_url": base,
@@ -278,7 +321,8 @@ def cmd_show(args):
     if name == "default":
         info = {"base_url": cp.get("server", "base_url", fallback="")}
     else:
-        info = dict(cp.items(sec)) if cp.has_section(sec) else {}
+        section = parser_section(cp, sec)
+        info = dict(cp.items(section)) if section is not None else {}
     info = {k: v for k, v in info.items()
             if k.lower() != "keys" and not k.lower().startswith("key")}
     if args.json:
