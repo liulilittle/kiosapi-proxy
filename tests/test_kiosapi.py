@@ -136,6 +136,17 @@ class TestJoinUpstreamURL(unittest.TestCase):
                 "/v1/models?api-version=new"),
             "https://x.invalid/v1/models?api-version=new")
 
+    def test_base_query_keeps_repeated_params(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("kiosapi", SCRIPT)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        self.assertEqual(
+            mod.join_upstream_url(
+                "https://x.invalid/v1?tag=a&tag=b",
+                "/v1/models?x=1"),
+            "https://x.invalid/v1/models?x=1&tag=a&tag=b")
+
     def test_trailing_slash_base(self):
         import importlib.util
         spec = importlib.util.spec_from_file_location("kiosapi", SCRIPT)

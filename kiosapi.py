@@ -478,18 +478,17 @@ def _merge_query(client_query, base_query):
     if not base_query:
         return client_query
     from urllib.parse import unquote_plus
-    seen = set()
+    client_names = set()
     for segment in client_query.split("&"):
         if segment:
-            seen.add(unquote_plus(segment.split("=", 1)[0]))
+            client_names.add(unquote_plus(segment.split("=", 1)[0]))
     extra = []
     for segment in base_query.split("&"):
         if not segment:
             continue
         name = unquote_plus(segment.split("=", 1)[0])
-        if name in seen:
+        if name in client_names:
             continue
-        seen.add(name)
         extra.append(segment)
     if not extra:
         return client_query
