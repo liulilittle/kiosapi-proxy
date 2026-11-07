@@ -52,10 +52,13 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 
 _NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirectHandler)
+_DIRECT_OPENER = urllib.request.build_opener(
+    urllib.request.ProxyHandler({}), _NoRedirectHandler)
 
 
-def _open_no_redirect(req, timeout):
-    return _NO_REDIRECT_OPENER.open(req, timeout=timeout)
+def _open_no_redirect(req, timeout, use_proxy=True):
+    opener = _NO_REDIRECT_OPENER if use_proxy else _DIRECT_OPENER
+    return opener.open(req, timeout=timeout)
 
 
 def normalize_upstream(name):
@@ -270,7 +273,7 @@ def reload_proxy(path, port_override=None):
         url, data=b"", method="POST",
         headers={"Authorization": "Bearer " + admin_key})
     try:
-        with _open_no_redirect(req, 5) as resp:
+        with _open_no_redirect(req, 5, use_proxy=False) as resp:
             return True, resp.read().decode("utf-8", errors="ignore")
     except urllib.error.HTTPError as ex:
         detail = "HTTP %s: %s" % (ex.code, ex.read().decode("utf-8", errors="ignore"))

@@ -238,6 +238,62 @@ class TestCli(unittest.TestCase):
         self.assertIn("302", detail)
         self.assertEqual(hits, [])
 
+    def test_reload_bypasses_environment_proxy(self):
+        admin_hits = []
+
+        class Admin(BaseHTTPRequestHandler):
+            def do_POST(self):
+                admin_hits.append(
+                    (self.path, self.headers.get("Authorization")))
+                body = b'{"ok": true}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        admin = self._serve(Admin)
+        proxy_hits = []
+
+        class Proxy(BaseHTTPRequestHandler):
+            def do_POST(self):
+                proxy_hits.append(self.path)
+                self.send_response(502)
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        proxy = self._serve(Proxy)
+        proxy_url = "http://127.0.0.1:%d" % proxy.server_address[1]
+        keys = ("http_proxy", "HTTP_PROXY", "no_proxy", "NO_PROXY")
+        saved = {key: os.environ.get(key) for key in keys}
+        try:
+            for key in keys:
+                os.environ.pop(key, None)
+            os.environ["http_proxy"] = proxy_url
+            os.environ["HTTP_PROXY"] = proxy_url
+            mod = load_manage()
+            path = os.path.join(self.tmp, "reload.ini")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("[server]\nhost = 127.0.0.1\nport = 1\n"
+                         "admin_key = adm-proxy-test\n[keys]\nkey1 = k1\n")
+            ok, detail = mod.reload_proxy(
+                path, port_override=admin.server_address[1])
+        finally:
+            for key, value in saved.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+        self.assertTrue(ok, detail)
+        self.assertEqual(proxy_hits, [])
+        self.assertEqual(admin_hits,
+                         [("/_admin/reload", "Bearer adm-proxy-test")])
+
     def test_probe_joins_base_url_with_query(self):
         paths = []
 
