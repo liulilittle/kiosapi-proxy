@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import aiohttp
 import contextlib
 import http.server
@@ -756,6 +756,30 @@ class TestConfigUnit(unittest.TestCase):
                     "base_url = https://x.invalid/v1\nmax_response_size = 0\n"
                     "[keys]\nkey1 = K\n")
         self.assertEqual(self._config_from_text(disabled).max_response_size, 0)
+
+    def test_save_state_restricts_posix_permissions(self):
+        tmpdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmpdir, True)
+        state_path = os.path.join(tmpdir, "state.json")
+        cfg = type("Cfg", (), {
+            "base_url": "https://x.invalid/v1", "model": "", "timeout": 10,
+            "keys": ["A"], "auth_keys": [], "state_file": state_path,
+            "reload_interval": 0, "path": "nonexistent.ini",
+            "log_requests": False, "upstreams": []})()
+        calls = []
+        original_flag = self.mod.POSIX_PERMISSIONS
+        original_chmod = self.mod.os.chmod
+        self.mod.POSIX_PERMISSIONS = True
+        self.mod.os.chmod = lambda path, mode: calls.append((path, mode))
+        try:
+            engine = self.mod.ProxyEngine(cfg)
+            engine.save_state()
+        finally:
+            self.mod.POSIX_PERMISSIONS = original_flag
+            self.mod.os.chmod = original_chmod
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], state_path + ".tmp")
+        self.assertEqual(calls[0][1], 0o600)
 
     def test_save_state_and_load_state_roundtrip(self):
         tmpdir = tempfile.mkdtemp()

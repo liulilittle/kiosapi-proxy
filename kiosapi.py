@@ -79,6 +79,7 @@ DEFAULT_COOLDOWN = 60.0
 AUTH_COOLDOWN = 3600.0
 MAX_COOLDOWN = 3600.0
 DEFAULT_MAX_BODY = 64 * 1024 * 1024
+POSIX_PERMISSIONS = os.name != "nt"
 
 
 class ConfigError(Exception):
@@ -797,6 +798,11 @@ class ProxyEngine:
             tmp = self.state_path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as fh:
                 json.dump(data, fh, ensure_ascii=False)
+            if POSIX_PERMISSIONS:
+                try:
+                    os.chmod(tmp, 0o600)
+                except OSError:
+                    pass
             os.replace(tmp, self.state_path)
             self._state_dirty = False
             self._last_state_save = time.monotonic()
