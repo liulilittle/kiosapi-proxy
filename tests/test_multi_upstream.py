@@ -1444,6 +1444,56 @@ class TestMultiUpstreamIntegration(unittest.TestCase):
         self.addCleanup(lambda: os.path.exists(path) and os.unlink(path))
         return proc, path, port
 
+    def test_concurrent_requests_across_upstreams_with_reload(self):
+        import concurrent.futures
+        FakeUpstream.behavior = {
+            "A1": {"status": 429, "body": json.dumps({"error": "rate_limit"})},
+            "A2": {"status": 200},
+            "B1": {"status": 200},
+        }
+        ini = server_block("{port}", self.base + "/default")
+        ini = ini.replace("timeout = 10", "timeout = 10\nadmin_key = admin-key")
+        ini += upstream_block("alpha", self.base + "/alpha/v1", ["A1", "A2"])
+        ini += upstream_block("beta", self.base + "/beta/v1", ["B1"])
+        _, ini_path, port = self._start(ini)
+        ini = ini.replace("{port}", str(port))
+        alternate = ini.replace("keys = A1, A2", "keys = A2, A1")
+        start = len(FakeUpstream.log)
+        errors = []
+
+        def worker(index):
+            upstream = "alpha" if index % 2 else "beta"
+            for _ in range(6):
+                status, body = http_call(
+                    port, "/%s/v1/chat/completions?i=%d" % (upstream, index))
+                if status != 200:
+                    errors.append((upstream, status, body[:120]))
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=12) as pool:
+            futures = [pool.submit(worker, index) for index in range(12)]
+            for round_no in range(6):
+                write_ini(ini_path, alternate if round_no % 2 else ini)
+                status, body = http_call(
+                    port, "/_admin/reload", key="admin-key", body={})
+                if status != 200:
+                    errors.append(("admin", status, body[:120]))
+                for future in futures:
+                    future.done()
+                time.sleep(0.05)
+            for future in futures:
+                future.result()
+        self.assertEqual(errors, [])
+        entries = FakeUpstream.log[start:]
+        self.assertTrue(entries)
+        for entry in entries:
+            self.assertIn("?i=", entry["path"])
+            if entry["path"].startswith("/alpha/v1"):
+                self.assertIn(entry["key"], ("A1", "A2"))
+            elif entry["path"].startswith("/beta/v1"):
+                self.assertEqual(entry["key"], "B1")
+            else:
+                self.fail("unexpected upstream path: " + entry["path"])
+
     def test_auth_rejects_missing_and_wrong_key(self):
         ini = server_block("{port}", self.base + "/default", auth_keys="pk-1, pk-2")
         _, _, port = self._start(ini)
