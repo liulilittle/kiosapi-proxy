@@ -1188,6 +1188,59 @@ class TestConfigUnit(unittest.TestCase):
         self.assertEqual(engine.default.pool.keys, ["C"])
         self.assertEqual(engine.config.default.keys, ["C"])
 
+    def test_reload_removing_upstream_keeps_inflight_and_reroutes(self):
+        old = self._config_from_text(
+            "[server]\nhost = 127.0.0.1\nport = 8787\n"
+            "base_url = https://new.invalid/v1\n[keys]\nkey1 = D\n"
+            "[upstream:alpha]\nbase_url = https://alpha.invalid/v1\n"
+            "prefix = /alpha\nkeys = A1\n")
+        new = self._config_from_text(
+            "[server]\nhost = 127.0.0.1\nport = 8787\n"
+            "base_url = https://new.invalid/v1\n[keys]\nkey1 = D\n")
+        started = asyncio.Event()
+        release = asyncio.Event()
+        seen = []
+
+        class Resp:
+            status = 200
+            headers = {}
+
+            async def read(self):
+                return b'{"ok":true}'
+
+            def release(self):
+                pass
+
+            def close(self):
+                pass
+
+        class Session:
+            async def request(self, method, url, data, headers, **kwargs):
+                seen.append(url)
+                started.set()
+                await release.wait()
+                return Resp()
+
+        async def scenario():
+            engine = self.mod.ProxyEngine(old)
+            engine.session = Session()
+            task = asyncio.create_task(engine.forward(
+                "POST", "/alpha/chat", b"{}", "application/json"))
+            await asyncio.wait_for(started.wait(), 5)
+            engine.apply_config(new)
+            release.set()
+            first = await task
+            second = await engine.forward(
+                "POST", "/alpha/chat", b"{}", "application/json")
+            return engine, first, second
+
+        engine, first, second = asyncio.run(scenario())
+        self.assertEqual(first[1], 200)
+        self.assertEqual(second[1], 200)
+        self.assertEqual(engine.upstreams, {})
+        self.assertTrue(seen[0].startswith("https://alpha.invalid"))
+        self.assertTrue(seen[1].startswith("https://new.invalid"))
+
     def test_read_stream_prefix_has_total_deadline(self):
         class Content:
             def __init__(self):
