@@ -1494,6 +1494,26 @@ class TestMultiUpstreamIntegration(unittest.TestCase):
             else:
                 self.fail("unexpected upstream path: " + entry["path"])
 
+    def test_absolute_form_target_is_pinned_to_upstream(self):
+        import socket as socket_mod
+        ini = server_block("{port}", self.base + "/default", auth_keys="pk")
+        _, _, port = self._start(ini)
+        FakeUpstream.log = []
+        sock = socket_mod.create_connection(("127.0.0.1", port), timeout=5)
+        try:
+            sock.sendall(
+                b"GET http://169.254.169.254/latest/meta-data HTTP/1.1\r\n"
+                b"Host: evil\r\nAuthorization: Bearer pk\r\n\r\n")
+            sock.settimeout(5)
+            sock.recv(65536)
+        finally:
+            sock.close()
+        entry = FakeUpstream.log[-1]
+        self.assertEqual(entry["path"], "/default/latest/meta-data")
+        self.assertEqual(entry["key"], "DEFAULT-KEY")
+        self.assertNotEqual(
+            entry["headers"].get("authorization"), "Bearer pk")
+
     def test_auth_rejects_missing_and_wrong_key(self):
         ini = server_block("{port}", self.base + "/default", auth_keys="pk-1, pk-2")
         _, _, port = self._start(ini)
